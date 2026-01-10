@@ -26,12 +26,19 @@ class Particle:
 
 class DistanceConstraint:
     def __init__(
-        self, p1: Particle, p2: Particle, target_length: float, stiffness: float = 1.0
+        self,
+        p1: Particle,
+        p2: Particle,
+        target_length: float,
+        stiffness: float = 1.0,
+        compliance: float = 0.0,
     ):
         self.p1 = p1
         self.p2 = p2
         self.target_length = target_length
         self.stiffness = stiffness
+        # compliance between 0 (rigid) and 1 (fully compliant)
+        self.compliance = compliance
 
     def solve(self):
         dx = self.p2.x - self.p1.x
@@ -83,10 +90,14 @@ class World:
             dt = self.dt
         # high-level step decomposition
         self.Gravity(dt)
-        self.Movement(dt)
 
-        # velocity-level link constraint to avoid stretching during integration
-        self.Link()
+        # velocity-level link constraint should be applied BEFORE movement to prevent
+        # velocities from causing immediate stretch during the position integration.
+        for _ in range(self.iterations):
+            self.Link()
+
+        # integrate positions
+        self.Movement(dt)
 
         # positional constraint solver (to correct residuals)
         for _ in range(self.iterations):
@@ -100,6 +111,14 @@ class World:
                 if p.vy < 0:
                     p.vy = -p.vy * self.restitution
                 p.vx *= self.friction
+
+        # small global damping to reduce numerical oscillations (keeps system stable)
+        damping = 0.998
+        for p in self.particles:
+            if p.inv_mass == 0:
+                continue
+            p.vx *= damping
+            p.vy *= damping
 
     def center_of_mass(self):
         sx = sy = sm = 0.0
@@ -131,13 +150,12 @@ class World:
             p.vx += g_x * dt
             p.vy += g_y * dt
 
-    def Link(self, compliance: float = 0.0):
+    def Link(self):
         """Velocity-level constraint: remove relative velocity along link direction to avoid length change.
 
-        This projects out the component of relative velocity along the constraint direction
-        so that the constraint length does not change due to velocities. The optional
-        compliance allows partial correction (0.0 = full correction).
+        Applies per-constraint compliance (c.compliance) and runs for `self.iterations`.
         """
+        # iterate to improve enforcement
         for c in self.constraints:
             p1 = c.p1
             p2 = c.p2
@@ -152,19 +170,19 @@ class World:
             rvx = p2.vx - p1.vx
             rvy = p2.vy - p1.vy
             v_rel = rvx * nx + rvy * ny
-            # compute impulse (velocity correction) to cancel that component
+            # compute impulse (velocity correction) to reduce that component
             w1 = p1.inv_mass
             w2 = p2.inv_mass
             wsum = w1 + w2
             if wsum == 0:
                 continue
-            # desired change in relative velocity to enforce zero along normal
-            dv = -v_rel * (1.0 - compliance)
+            # desired change depends on compliance of this constraint
+            dv = -v_rel * (1.0 - c.compliance)
             # convert dv to impulses for each particle: J = dv / (w1+w2)
             j = dv / wsum
             jx = j * nx
             jy = j * ny
-            # apply velocity changes Δv = ± j * inv_mass
+            # apply velocity changes Δv = ± j * inv_mass_contrib
             if p1.inv_mass != 0:
                 p1.vx -= jx * w1
                 p1.vy -= jy * w1

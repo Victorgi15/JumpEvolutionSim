@@ -70,6 +70,7 @@ class Creature:
         total_energy = 0.0
         clocks = self.genome.get("clocks", [])
         muscles = self.genome.get("muscles", [])
+        self.last_activations = []
         # for each segment, apply a linear muscle between its two endpoint particles
         for i, c in enumerate(self.muscle_constraints):
             # particles forming the constraint
@@ -87,6 +88,10 @@ class Creature:
             force = muscle["force_max"] * activation * amp
             energy = self.world.muscle_pair(p1, p2, force, dt)
             total_energy += energy
+            # record for visualization
+            self.last_activations.append(
+                {"p1": p1, "p2": p2, "activation": activation, "force": force}
+            )
         return total_energy
 
     def center_of_mass(self):

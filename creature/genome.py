@@ -4,22 +4,42 @@ import random
 
 
 def default_genome():
-    # Two segments in series. segment_lengths: [l1, l2]
+    # Default chain genome (kept for backward compatibility)
     return {
+        "type": "chain",
         "segments": [0.4, 0.5],
         "masses": [1.0, 0.8],
         "muscles": [
             {"force_max": 150.0, "stiffness": 1.0},
-            {"force_max": 120.0, "stiffness": 1.0},
+            {"force_max": 120.0, "stiffness": 1.0}
         ],
         # clocks per muscle: freq (Hz), phase (rad), amp (relative length change)
         "clocks": [
             {"freq": 1.5, "phase": 0.0, "amp": 0.2},
-            {"freq": 1.5, "phase": 0.5, "amp": 0.2},
+            {"freq": 1.5, "phase": 0.5, "amp": 0.2}
         ],
         # target relative length factor (1.0 = nominal)
-        "rest_factors": [1.0, 1.0],
+        "rest_factors": [1.0, 1.0]
     }
+
+
+def humanoid_genome():
+    # simple humanoid genome: placeholder muscle params on limbs
+    g = {
+        "type": "humanoid",
+        "muscle_params": [
+            {"force_max": 150.0},
+            {"force_max": 150.0},
+            {"force_max": 100.0},
+            {"force_max": 100.0}
+        ],
+        "clocks": {
+            "freq": 1.5,
+            "phase_offset": 0.5,
+            "amp": 1.0
+        }
+    }
+    return g
 
 
 def random_genome(rng=None):

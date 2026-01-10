@@ -6,7 +6,14 @@ from creature.genome import default_genome
 from creature.creature import Creature
 
 
-def evaluate(genome, duration=5.0, dt=1 / 240.0, alpha=1e-3, log_csv: str = None, seed: int = None):
+def evaluate(
+    genome,
+    duration=5.0,
+    dt=1 / 240.0,
+    alpha=1e-3,
+    log_csv: str = None,
+    seed: int = None,
+):
     """Simulate genome for duration and return metrics: height, energy, fitness.
 
     Optional: append metrics to CSV `log_csv`.
@@ -37,6 +44,7 @@ def evaluate(genome, duration=5.0, dt=1 / 240.0, alpha=1e-3, log_csv: str = None
     if log_csv is not None:
         try:
             from experiments.logger import append_metrics_csv
+
             append_metrics_csv(log_csv, metrics)
         except Exception as e:
             print("Failed to write CSV:", e)

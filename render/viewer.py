@@ -12,8 +12,9 @@ except Exception:
 
 
 class Viewer:
-    def __init__(self, world, width=800, height=600, scale=200.0):
+    def __init__(self, world, creature=None, width=800, height=600, scale=200.0):
         self.world = world
+        self.creature = creature
         self.width = width
         self.height = height
         self.scale = scale  # meters -> pixels
@@ -60,7 +61,23 @@ class Viewer:
             a = self.world_to_screen(c.p1.x, c.p1.y)
             b = self.world_to_screen(c.p2.x, c.p2.y)
             pygame.draw.line(self.screen, (200, 200, 200), a, b, 3)
-
+        # if a creature is provided and has muscle activation data, draw muscles
+        if self.creature is not None and hasattr(self.creature, "last_activations"):
+            for m in self.creature.last_activations:
+                p1 = m["p1"]
+                p2 = m["p2"]
+                act = m["activation"]
+                force = m["force"]
+                a = self.world_to_screen(p1.x, p1.y)
+                b = self.world_to_screen(p2.x, p2.y)
+                # activation color: low=grey, high=red
+                col = (
+                    int(200 * act + 55 * (1 - act)),
+                    int(50 * (1 - act)),
+                    int(50 * (1 - act)),
+                )
+                width = max(1, int(1 + force / 100.0))
+                pygame.draw.line(self.screen, col, a, b, width)
         # particles as circles
         for p in self.world.particles:
             s = max(3, int(5 + (0 if p.inv_mass == 0 else (1.0 / p.inv_mass)) * 0.5))
