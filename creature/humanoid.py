@@ -52,7 +52,6 @@ class HumanoidCreature:
             (0.3, 0.9),  # shoulder right
             (-0.45, 0.7),  # elbow left
             (0.45, 0.7),  # elbow right
-            (0.0, 1.25),  # head
         ]
 
         # create particles
@@ -72,7 +71,6 @@ class HumanoidCreature:
             (5, 7, 0.32, True, 0.0),  # torso top to shoulder right
             (6, 8, 0.3, True, 0.0),  # shoulder left -> elbow
             (7, 9, 0.3, True, 0.0),  # shoulder right -> elbow
-            (5, 10, 0.28, False, 0.0),  # torso top -> head
         ]
 
         for i, j, L, is_muscle, comp in edges:
@@ -110,7 +108,9 @@ class HumanoidCreature:
         self.pose_elapsed += dt
         duration = self.pose_sequence[self.pose_index].get("duration", 1.0)
         # pose progress (clamped to 0..1)
-        self.pose_progress = min(1.0, self.pose_elapsed / duration if duration > 0 else 0.0)
+        self.pose_progress = min(
+            1.0, self.pose_elapsed / duration if duration > 0 else 0.0
+        )
         if self.pose_elapsed >= duration:
             self.pose_elapsed = 0.0
             self.pose_index = (self.pose_index + 1) % len(self.pose_sequence)
@@ -200,29 +200,43 @@ class HumanoidCreature:
                 # choose support points (knees act as feet in this simple model)
                 left_foot = self.particles[3]
                 right_foot = self.particles[4]
-                support_center_x = 0.5 * (left_foot.x + right_foot.x)
+                left_x = left_foot.x
+                right_x = right_foot.x
+                min_x = min(left_x, right_x)
+                max_x = max(left_x, right_x)
                 com_x, _ = self.world.center_of_mass()
-                error_x = support_center_x - com_x
-                # compute PD force and clamp
-                max_bal = 200.0 * self.force_scale
-                bal_force = self.balance_kp * error_x - self.balance_kd * pelvis.vx
-                bal_force = max(-max_bal, min(max_bal, bal_force))
-                # create or update pelvis support anchor
-                if not hasattr(self, "anchors"):
-                    self.anchors = {}
-                if "pelvis_support" not in self.anchors:
-                    anchor = Particle(support_center_x, pelvis.y, 0.0, 0.0, 0.0)
-                    self.world.add_particle(anchor)
-                    self.anchors["pelvis_support"] = anchor
-                else:
-                    anchor = self.anchors["pelvis_support"]
-                    anchor.x = support_center_x
-                    anchor.y = pelvis.y
-                energy = self.world.muscle_pair(pelvis, anchor, bal_force, dt)
-                total_energy += energy
-                self.last_activations.append(
-                    {"p1": pelvis, "p2": anchor, "activation": abs(bal_force) / max_bal, "force": abs(bal_force)}
-                )
+                # only correct if COM is outside support region (small deadzone)
+                tol = 0.02
+                target_x = None
+                if com_x < (min_x - tol):
+                    target_x = min_x
+                elif com_x > (max_x + tol):
+                    target_x = max_x
+                if target_x is not None:
+                    error_x = target_x - com_x
+                    # compute PD force and clamp
+                    max_bal = 200.0 * self.force_scale
+                    bal_force = self.balance_kp * error_x - self.balance_kd * pelvis.vx
+                    bal_force = max(-max_bal, min(max_bal, bal_force))
+                    # create or update pelvis support anchor (at target_x)
+                    if "pelvis_support" not in self.anchors:
+                        anchor = Particle(target_x, pelvis.y, 0.0, 0.0, 0.0)
+                        self.world.add_particle(anchor)
+                        self.anchors["pelvis_support"] = anchor
+                    else:
+                        anchor = self.anchors["pelvis_support"]
+                        anchor.x = target_x
+                        anchor.y = pelvis.y
+                    energy = self.world.muscle_pair(pelvis, anchor, bal_force, dt)
+                    total_energy += energy
+                    self.last_activations.append(
+                        {
+                            "p1": pelvis,
+                            "p2": anchor,
+                            "activation": abs(bal_force) / max_bal,
+                            "force": abs(bal_force),
+                        }
+                    )
             except Exception:
                 pass
         return total_energy
