@@ -8,10 +8,11 @@ from physics.engine import Particle, DistanceConstraint, World
 
 
 class HumanoidCreature:
-    def __init__(self, genome: Dict, world: World, base_x=0.0):
+    def __init__(self, genome: Dict, world: World, base_x=0.0, force_scale: float = 1.0):
         self.genome = genome
         self.world = world
         self.base_x = base_x
+        self.force_scale = force_scale
         self.particles: List[Particle] = []
         self.constraints: List[DistanceConstraint] = []
         self.muscle_edges = []
@@ -86,12 +87,14 @@ class HumanoidCreature:
         pelvis = self.particles[0]
         px, py = pelvis.x, pelvis.y
         # compute world targets only when entering a new pose so targets stay fixed in world frame
-        if not hasattr(self, "_last_pose_index") or self._last_pose_index != self.pose_index:
+        if (
+            not hasattr(self, "_last_pose_index")
+            or self._last_pose_index != self.pose_index
+        ):
             self.current_targets = {}
             for idx, rel in current_pose.items():
                 self.current_targets[int(idx)] = (px + rel[0], py + rel[1])
             self._last_pose_index = self.pose_index
-
 
     def step_actuators(self, t: float, dt: float) -> float:
         """Actuate cyclic muscles and PD-track pose targets if present.
@@ -109,7 +112,7 @@ class HumanoidCreature:
                 1.0
                 + __import__("math").sin(2 * __import__("math").pi * 1.5 * t + phase)
             )
-            force = params["force_max"] * act
+            force = params["force_max"] * self.force_scale * act
             energy = self.world.muscle_pair(c.p1, c.p2, force, dt)
             total_energy += energy
             self.last_activations.append(
@@ -120,7 +123,7 @@ class HumanoidCreature:
             pelvis = self.particles[0]
             kp = 80.0
             kd = 40.0
-            max_force = 200.0
+            max_force = 200.0 * self.force_scale
             for idx, (tx, ty) in self.current_targets.items():
                 if idx < 0 or idx >= len(self.particles):
                     continue
