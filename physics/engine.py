@@ -74,8 +74,6 @@ class World:
         self.iterations = 8
         self.restitution = 0.0
         self.friction = 0.8
-        # density used to compute mass from link lengths
-        self.linear_density = 1.0
 
     def add_particle(self, p: Particle):
         self.particles.append(p)
@@ -190,94 +188,90 @@ class World:
                 p2.vx += jx * w2
                 p2.vy += jy * w2
 
-    def Contract(
-        self, top: Particle, left: Particle, right: Particle, force: float, dt: float
-    ):
-        """Apply a muscle contraction that acts on three points (two lower endpoints and a top).
+    @staticmethod
+    def _wrap_angle(rad: float) -> float:
+        while rad > math.pi:
+            rad -= 2.0 * math.pi
+        while rad < -math.pi:
+            rad += 2.0 * math.pi
+        return rad
 
-        The muscle applies equal impulses to `left` and `right` directing them towards their
-        centroid and slightly downward; the top receives the opposite impulse (conserving momentum).
-        `force` is peak force (N); impulses applied are force * dt.
-        """
-        # centroid of left and right
-        cx = 0.5 * (left.x + right.x)
-        cy = 0.5 * (left.y + right.y)
-        impulses = []
-        total_ix = 0.0
-        total_iy = 0.0
-        for p in (left, right):
-            # direction from point to centroid
-            dx = cx - p.x
-            dy = cy - p.y
-            # encourage downward motion too
-            dy -= abs(0.2 * (p.y - top.y))
-            norm = math.hypot(dx, dy)
-            if norm == 0:
-                ux, uy = 0.0, -1.0
-            else:
-                ux = dx / norm
-                uy = dy / norm
-            imp_mag = force * dt * 0.5  # split half to each side
-            ix = ux * imp_mag
-            iy = uy * imp_mag
-            impulses.append((ix, iy))
-            total_ix += ix
-            total_iy += iy
-
-        # apply impulses to left and right
-        for p, (ix, iy) in zip((left, right), impulses):
-            p.apply_impulse(ix, iy)
-
-        # apply opposite impulse to top to conserve momentum
-        top.apply_impulse(-total_ix, -total_iy)
-
-    def muscle_pair(self, p1: Particle, p2: Particle, force: float, dt: float) -> float:
-        """Apply a linear muscle between two particles.
-
-        - force: peak force (N) pulling p1 towards p2 and p2 towards p1
-        - dt: timestep
-        Returns an estimate of the energy consumed during this step (work = force * velocity_along * dt)
-        """
-        dx = p2.x - p1.x
-        dy = p2.y - p1.y
-        dist = math.hypot(dx, dy)
-        if dist == 0:
+    def joint_angle(self, joint: Particle, left: Particle, right: Particle) -> float:
+        """Return signed joint angle at `joint` between vectors (left-joint) and (right-joint)."""
+        lx = left.x - joint.x
+        ly = left.y - joint.y
+        rx = right.x - joint.x
+        ry = right.y - joint.y
+        Ll = math.hypot(lx, ly)
+        Lr = math.hypot(rx, ry)
+        if Ll == 0 or Lr == 0:
             return 0.0
-        nx = dx / dist
-        ny = dy / dist
-        # relative velocity along the link direction (positive if p2 moving away from p1)
-        rvx = p2.vx - p1.vx
-        rvy = p2.vy - p1.vy
-        v_rel = rvx * nx + rvy * ny
-        # impulse magnitude
-        J = force * dt
-        ix = J * nx
-        iy = J * ny
-        # apply impulses (p1 receives +, p2 receives -)
-        p1.apply_impulse(ix, iy)
-        p2.apply_impulse(-ix, -iy)
-        # energy ~ positive work done by muscle: force * contraction_speed * dt
-        # contraction speed is -v_rel when v_rel < 0 (closing). Only positive work counts.
-        contraction_speed = max(0.0, -v_rel)
-        energy = force * contraction_speed * dt
-        return energy
+        dot = lx * rx + ly * ry
+        cross = lx * ry - ly * rx
+        return math.atan2(cross, dot)
 
-    def SetLength(self, constraint: DistanceConstraint, new_length: float):
-        """Set target length for a constraint and update masses of attached particles based on
-        adjacent link lengths (simple linear density model)."""
-        constraint.target_length = new_length
-        # recompute masses for particles: sum of adjacent constraint lengths * density
-        # build adjacency
-        adj = {p: [] for p in self.particles}
-        for c in self.constraints:
-            adj[c.p1].append(c)
-            adj[c.p2].append(c)
-        for p, neigh in adj.items():
-            if p.inv_mass == 0:
-                continue
-            total_length = 0.0
-            for c in neigh:
-                # use the constraint target length as segment length
-                total_length += c.target_length
-            mass = max(1e-6, total_length * self.linear_density)
-            p.inv_mass = 1.0 / mass
+    def joint_angular_velocity(
+        self, joint: Particle, left: Particle, right: Particle
+    ) -> float:
+        """Estimate relative angular velocity between the two segments around `joint`."""
+        lx = left.x - joint.x
+        ly = left.y - joint.y
+        rx = right.x - joint.x
+        ry = right.y - joint.y
+        Ll = math.hypot(lx, ly)
+        Lr = math.hypot(rx, ry)
+        if Ll == 0 or Lr == 0:
+            return 0.0
+        tlx = -ly / Ll
+        tly = lx / Ll
+        trx = -ry / Lr
+        try_ = rx / Lr
+        vla_x = left.vx - joint.vx
+        vla_y = left.vy - joint.vy
+        vrc_x = right.vx - joint.vx
+        vrc_y = right.vy - joint.vy
+        w_left = (vla_x * tlx + vla_y * tly) / Ll
+        w_right = (vrc_x * trx + vrc_y * try_) / Lr
+        return w_right - w_left
+
+    def apply_joint_torque(
+        self, joint: Particle, left: Particle, right: Particle, torque: float, dt: float
+    ) -> float:
+        """Apply equal and opposite torques on the two segments around a joint."""
+        self._apply_pair_couple(joint, left, torque, dt)
+        self._apply_pair_couple(joint, right, -torque, dt)
+        return 0.0
+
+    def apply_joint_angle_pd(
+        self,
+        joint: Particle,
+        left: Particle,
+        right: Particle,
+        target_angle: float,
+        stiffness: float,
+        damping: float,
+        dt: float,
+    ):
+        """Apply a spring-damper torque driving the joint toward `target_angle`."""
+        angle = self.joint_angle(joint, left, right)
+        w_rel = self.joint_angular_velocity(joint, left, right)
+        err = self._wrap_angle(target_angle - angle)
+        torque = stiffness * err - damping * w_rel
+        self.apply_joint_torque(joint, left, right, torque, dt)
+        energy = max(0.0, torque * w_rel) * dt
+        return torque, err, energy
+
+    def _apply_pair_couple(
+        self, p_left: Particle, p_right: Particle, torque: float, dt: float
+    ) -> None:
+        dx = p_right.x - p_left.x
+        dy = p_right.y - p_left.y
+        s = math.hypot(dx, dy)
+        if s == 0:
+            return
+        nx = -dy / s
+        ny = dx / s
+        F = torque / s
+        J = F * dt
+        p_left.apply_impulse(J * nx, J * ny)
+        p_right.apply_impulse(-J * nx, -J * ny)
