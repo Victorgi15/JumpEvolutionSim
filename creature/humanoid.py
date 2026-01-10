@@ -9,12 +9,23 @@ from physics.engine import Particle, DistanceConstraint, World
 
 class HumanoidCreature:
     def __init__(
-        self, genome: Dict, world: World, base_x=0.0, force_scale: float = 1.0
+        self,
+        genome: Dict,
+        world: World,
+        base_x=0.0,
+        force_scale: float = 1.0,
+        balance_assist: bool = True,
+        balance_kp: float = 80.0,
+        balance_kd: float = 10.0,
     ):
         self.genome = genome
         self.world = world
         self.base_x = base_x
         self.force_scale = force_scale
+        # balance assist params
+        self.balance_assist = balance_assist
+        self.balance_kp = balance_kp
+        self.balance_kd = balance_kd
         self.particles: List[Particle] = []
         self.constraints: List[DistanceConstraint] = []
         self.muscle_edges = []
@@ -22,6 +33,8 @@ class HumanoidCreature:
         self.controller_time = 0.0
         self.pose_progress = 0.0
         self._last_pose_index = None
+        # anchor storage for targets and pelvis support
+        self.anchors = {}
         self._build()
 
     def _build(self):
@@ -70,7 +83,15 @@ class HumanoidCreature:
             self.constraints.append(c)
             if is_muscle:
                 # muscles will use genome params (if provided) mapped by index
-                default_muscle = {"force_max": 120.0, "stiffness": 1.0}
+                # stronger default for leg muscles (hip->knee)
+                leg_pairs = {(1, 3), (2, 4)}
+                shoulder_pairs = {(5, 6), (5, 7), (6, 8), (7, 9)}
+                if (i, j) in leg_pairs:
+                    default_muscle = {"force_max": 380.0, "stiffness": 1.2}
+                elif (i, j) in shoulder_pairs:
+                    default_muscle = {"force_max": 160.0, "stiffness": 1.0}
+                else:
+                    default_muscle = {"force_max": 120.0, "stiffness": 1.0}
                 self.muscle_edges.append({"constraint": c, "params": default_muscle})
 
     def step_controller(self, t: float, dt: float):
@@ -81,11 +102,15 @@ class HumanoidCreature:
         """
         if not hasattr(self, "pose_sequence") or len(self.pose_sequence) == 0:
             return
+        # expose controller time
+        self.controller_time = t
         if not hasattr(self, "pose_index"):
             self.pose_index = 0
             self.pose_elapsed = 0.0
         self.pose_elapsed += dt
         duration = self.pose_sequence[self.pose_index].get("duration", 1.0)
+        # pose progress (clamped to 0..1)
+        self.pose_progress = min(1.0, self.pose_elapsed / duration if duration > 0 else 0.0)
         if self.pose_elapsed >= duration:
             self.pose_elapsed = 0.0
             self.pose_index = (self.pose_index + 1) % len(self.pose_sequence)
@@ -93,10 +118,7 @@ class HumanoidCreature:
         pelvis = self.particles[0]
         px, py = pelvis.x, pelvis.y
         # compute world targets only when entering a new pose so targets stay fixed in world frame
-        if (
-            not hasattr(self, "_last_pose_index")
-            or self._last_pose_index != self.pose_index
-        ):
+        if self._last_pose_index != self.pose_index:
             self.current_targets = {}
             for idx, rel in current_pose.items():
                 self.current_targets[int(idx)] = (px + rel[0], py + rel[1])
@@ -171,6 +193,38 @@ class HumanoidCreature:
                         "force": abs(force_mag),
                     }
                 )
+        # Balance assist: keep COM over support (feet) by applying small horizontal force to pelvis
+        if self.balance_assist:
+            try:
+                pelvis = self.particles[0]
+                # choose support points (knees act as feet in this simple model)
+                left_foot = self.particles[3]
+                right_foot = self.particles[4]
+                support_center_x = 0.5 * (left_foot.x + right_foot.x)
+                com_x, _ = self.world.center_of_mass()
+                error_x = support_center_x - com_x
+                # compute PD force and clamp
+                max_bal = 200.0 * self.force_scale
+                bal_force = self.balance_kp * error_x - self.balance_kd * pelvis.vx
+                bal_force = max(-max_bal, min(max_bal, bal_force))
+                # create or update pelvis support anchor
+                if not hasattr(self, "anchors"):
+                    self.anchors = {}
+                if "pelvis_support" not in self.anchors:
+                    anchor = Particle(support_center_x, pelvis.y, 0.0, 0.0, 0.0)
+                    self.world.add_particle(anchor)
+                    self.anchors["pelvis_support"] = anchor
+                else:
+                    anchor = self.anchors["pelvis_support"]
+                    anchor.x = support_center_x
+                    anchor.y = pelvis.y
+                energy = self.world.muscle_pair(pelvis, anchor, bal_force, dt)
+                total_energy += energy
+                self.last_activations.append(
+                    {"p1": pelvis, "p2": anchor, "activation": abs(bal_force) / max_bal, "force": abs(bal_force)}
+                )
+            except Exception:
+                pass
         return total_energy
 
     def set_pose_sequence(self, sequence):
