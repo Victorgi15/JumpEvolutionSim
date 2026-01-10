@@ -17,6 +17,7 @@ class HumanoidCreature:
         balance_assist: bool = True,
         balance_kp: float = 80.0,
         balance_kd: float = 10.0,
+        max_up_g_factor: float = 2.5,
     ):
         self.genome = genome
         self.world = world
@@ -26,6 +27,8 @@ class HumanoidCreature:
         self.balance_assist = balance_assist
         self.balance_kp = balance_kp
         self.balance_kd = balance_kd
+        # maximum upward force allowed in multiples of weight (mass * g)
+        self.max_up_g_factor = max_up_g_factor
         self.particles: List[Particle] = []
         self.constraints: List[DistanceConstraint] = []
         self.muscle_edges = []
@@ -141,6 +144,21 @@ class HumanoidCreature:
                 + __import__("math").sin(2 * __import__("math").pi * 1.5 * t + phase)
             )
             force = params["force_max"] * self.force_scale * act
+            # clamp upward component to avoid "flying" when muscles are too strong
+            dx = c.p2.x - c.p1.x
+            dy = c.p2.y - c.p1.y
+            dist = (dx * dx + dy * dy) ** 0.5
+            if dist != 0:
+                ux = dx / dist
+                uy = dy / dist
+                if uy > 0:
+                    # approximate mass of p1 (if p1 is the actuator) else use both
+                    m1 = 0.0 if c.p1.inv_mass == 0 else 1.0 / c.p1.inv_mass
+                    # max upward force allowed based on weight
+                    max_up_force = m1 * abs(self.world.gravity[1]) * self.max_up_g_factor
+                    # vertical component is force * uy
+                    if force * uy > max_up_force and uy > 0:
+                        force = max_up_force / uy
             energy = self.world.muscle_pair(c.p1, c.p2, force, dt)
             total_energy += energy
             self.last_activations.append(
@@ -183,6 +201,14 @@ class HumanoidCreature:
                 else:
                     force_mag = kp * dist - kd * v_along
                     force_mag = max(-max_force, min(max_force, force_mag))
+                # clamp upward component to prevent launching
+                ux = ux
+                uy = uy
+                if uy > 0:
+                    m_p = 0.0 if p.inv_mass == 0 else 1.0 / p.inv_mass
+                    max_up_force = m_p * abs(self.world.gravity[1]) * self.max_up_g_factor * self.force_scale
+                    if force_mag * uy > max_up_force:
+                        force_mag = max_up_force / uy
                 energy = self.world.muscle_pair(p, anchor, force_mag, dt)
                 total_energy += energy
                 self.last_activations.append(
