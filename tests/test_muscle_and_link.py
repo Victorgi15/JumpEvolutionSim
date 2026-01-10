@@ -1,15 +1,29 @@
+import math
 from physics.engine import World, Particle, DistanceConstraint
 
 
-def test_muscle_energy_nonnegative():
+def test_joint_angle_controller_reduces_error():
     w = World()
-    p1 = Particle(0, 0, 0.0, 0.0, 1.0)
-    p2 = Particle(0, 0.5, 0.0, -0.5, 1.0)
-    w.add_particle(p1)
-    w.add_particle(p2)
-    energy = w.muscle_pair(p1, p2, force=100.0, dt=1 / 120.0)
-    assert isinstance(energy, float)
-    assert energy >= 0.0
+    a = Particle(-0.2, 0.0, 0.0, 0.0, 1.0)
+    b = Particle(0.2, 0.0, 0.0, 0.0, 1.0)
+    c = Particle(0.2, 0.4, 0.0, 0.0, 1.0)
+    w.add_particle(a)
+    w.add_particle(b)
+    w.add_particle(c)
+    L_ab = math.hypot(b.x - a.x, b.y - a.y)
+    L_bc = math.hypot(c.x - b.x, c.y - b.y)
+    w.add_constraint(DistanceConstraint(a, b, L_ab))
+    w.add_constraint(DistanceConstraint(b, c, L_bc))
+
+    start_angle = w.joint_angle(b, a, c)
+    target = start_angle - 0.6
+    err0 = abs(w._wrap_angle(target - start_angle))
+    for _ in range(120):
+        w.apply_joint_angle_pd(b, a, c, target, stiffness=6.0, damping=1.2, dt=w.dt)
+        w.step(w.dt)
+    end_angle = w.joint_angle(b, a, c)
+    err1 = abs(w._wrap_angle(target - end_angle))
+    assert err1 < err0
 
 
 def test_link_preserves_length():
@@ -30,6 +44,6 @@ def test_link_preserves_length():
 
 
 if __name__ == "__main__":
-    test_muscle_energy_nonnegative()
+    test_joint_angle_controller_reduces_error()
     test_link_preserves_length()
     print("OK")

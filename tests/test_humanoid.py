@@ -4,7 +4,7 @@ from physics.engine import World
 
 def test_humanoid_lengths_stable():
     w = World()
-    w.dt = 1/240.0
+    w.dt = 1 / 240.0
     h = HumanoidCreature({}, w, base_x=0.0)
     # record nominal lengths
     nominal = [c.target_length for c in h.constraints]
@@ -18,10 +18,10 @@ def test_humanoid_lengths_stable():
     for c, L0 in zip(h.constraints, nominal):
         dx = c.p2.x - c.p1.x
         dy = c.p2.y - c.p1.y
-        dist = (dx*dx + dy*dy) ** 0.5
+        dist = (dx * dx + dy * dy) ** 0.5
         assert abs(dist - L0) < tol
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     test_humanoid_lengths_stable()
-    print('OK')
+    print("OK")
