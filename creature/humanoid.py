@@ -1,9 +1,7 @@
-"""Humanoid creature builder matching the requested structure.
-
-Creates a central spine with shoulders and hips; simple symmetric 2-DoF arms/legs.
-"""
+"""Humanoid creature builder with joint angle actuators."""
 
 from typing import Dict, List
+import math
 from physics.engine import Particle, DistanceConstraint, World
 
 
@@ -15,41 +13,29 @@ class HumanoidCreature:
         base_x=0.0,
         force_scale: float = 1.0,
         cycle_freq: float = 1.5,
-        balance_assist: bool = True,
-        balance_kp: float = 80.0,
-        balance_kd: float = 10.0,
-        max_up_g_factor: float = 2.5,
-        anchor_inv_mass: float = 0.02,
+        stiffness: float = 6.0,
+        damping: float = 1.2,
+        default_amp: float = 0.35,
     ):
         self.genome = genome
         self.world = world
         self.base_x = base_x
         self.force_scale = force_scale
-        # muscle cycle frequency (Hz)
         self.cycle_freq = cycle_freq
-        # balance assist params
-        self.balance_assist = balance_assist
-        self.balance_kp = balance_kp
-        self.balance_kd = balance_kd
-        # maximum upward force allowed in multiples of weight (mass * g)
-        self.max_up_g_factor = max_up_g_factor
-        # anchor inverse mass (small but non-zero -> anchors are affected by gravity but resist muscle impulses)
-        self.anchor_inv_mass = anchor_inv_mass
+        self.stiffness = stiffness
+        self.damping = damping
+        self.default_amp = default_amp
         self.particles: List[Particle] = []
         self.constraints: List[DistanceConstraint] = []
-        self.muscle_edges = []
-        # controller diagnostics
+        self.joints: List[dict] = []
+        self.joint_params: List[dict] = []
+        self.current_joint_targets: List[float] = []
         self.controller_time = 0.0
-        self.pose_progress = 0.0
-        self._last_pose_index = None
-        # anchor storage for targets and pelvis support
-        self.anchors = {}
         self._build()
 
     def _build(self):
         # default geometry (meters)
-        # nodes defined relative to base_x, base y = 0
-        # order: root (pelvis center), hip left, hip right, knee left, knee right, torso top, shoulder left, shoulder right, elbow left, elbow right, head
+        # order: pelvis, hip L, hip R, knee L, knee R, torso top, shoulder L, shoulder R, elbow L, elbow R
         nodes = [
             (0.0, 0.6),  # pelvis
             (-0.2, 0.4),  # hip left
@@ -63,266 +49,107 @@ class HumanoidCreature:
             (0.45, 0.7),  # elbow right
         ]
 
-        # create particles
         for x, y in nodes:
             p = Particle(self.base_x + x, y, 0.0, 0.0, 1.0)
             self.world.add_particle(p)
             self.particles.append(p)
 
-        # edges: (i,j,length,is_muscle,compliance)
         edges = [
-            (0, 1, 0.24, False, 0.0),  # pelvis to hip left
-            (0, 2, 0.24, False, 0.0),  # pelvis to hip right
-            (1, 3, 0.35, True, 0.0),  # hip left to knee
-            (2, 4, 0.35, True, 0.0),  # hip right to knee
-            (0, 5, 0.5, False, 0.0),  # pelvis to torso top
-            (5, 6, 0.32, True, 0.0),  # torso top to shoulder left
-            (5, 7, 0.32, True, 0.0),  # torso top to shoulder right
-            (6, 8, 0.3, True, 0.0),  # shoulder left -> elbow
-            (7, 9, 0.3, True, 0.0),  # shoulder right -> elbow
+            (0, 1, 0.24),
+            (0, 2, 0.24),
+            (1, 3, 0.35),
+            (2, 4, 0.35),
+            (0, 5, 0.5),
+            (5, 6, 0.32),
+            (5, 7, 0.32),
+            (6, 8, 0.3),
+            (7, 9, 0.3),
         ]
 
-        for i, j, L, is_muscle, comp in edges:
+        for i, j, L in edges:
             p1 = self.particles[i]
             p2 = self.particles[j]
-            c = DistanceConstraint(p1, p2, L, stiffness=1.0, compliance=comp)
+            c = DistanceConstraint(p1, p2, L, stiffness=1.0, compliance=0.0)
             self.world.add_constraint(c)
             self.constraints.append(c)
-            if is_muscle:
-                # muscles will use genome params (if provided) mapped by index
-                # stronger default for leg muscles (hip->knee)
-                leg_pairs = {(1, 3), (2, 4)}
-                shoulder_pairs = {(5, 6), (5, 7), (6, 8), (7, 9)}
-                if (i, j) in leg_pairs:
-                    default_muscle = {"force_max": 380.0, "stiffness": 1.2}
-                elif (i, j) in shoulder_pairs:
-                    default_muscle = {"force_max": 160.0, "stiffness": 1.0}
-                else:
-                    default_muscle = {"force_max": 120.0, "stiffness": 1.0}
-                self.muscle_edges.append({"constraint": c, "params": default_muscle})
+
+        # joint definitions (joint index, left index, right index, default phase)
+        self.joints = [
+            {"name": "hip_left", "joint": 1, "left": 0, "right": 3, "phase": 0.0},
+            {"name": "hip_right", "joint": 2, "left": 0, "right": 4, "phase": math.pi},
+            {"name": "shoulder_left", "joint": 6, "left": 5, "right": 8, "phase": math.pi},
+            {"name": "shoulder_right", "joint": 7, "left": 5, "right": 9, "phase": 0.0},
+        ]
+
+        self._init_joint_params()
+
+    def _init_joint_params(self):
+        defaults = self.genome.get("joint_params", [])
+        base_freq = self.genome.get("cycle_freq", self.cycle_freq)
+        base_k = self.genome.get("stiffness", self.stiffness)
+        base_d = self.genome.get("damping", self.damping)
+
+        self.joint_params = []
+        for i, jdef in enumerate(self.joints):
+            joint = self.particles[jdef["joint"]]
+            left = self.particles[jdef["left"]]
+            right = self.particles[jdef["right"]]
+            rest_angle = self.world.joint_angle(joint, left, right)
+            params = defaults[i] if i < len(defaults) else {}
+            params = {
+                "rest_angle": params.get("rest_angle", rest_angle),
+                "target_angle": params.get("target_angle", None),
+                "amp": params.get("amp", self.default_amp),
+                "freq": params.get("freq", base_freq),
+                "phase": params.get("phase", jdef["phase"]),
+                "stiffness": params.get("stiffness", base_k),
+                "damping": params.get("damping", base_d),
+            }
+            self.joint_params.append(params)
 
     def step_controller(self, t: float, dt: float):
-        """Advance the internal pose clock and set current_targets (world positions) for particles.
-
-        Expects `self.pose_sequence` to be a list of dicts: { 'duration': float, 'targets': {idx:(x_rel,y_rel)} }
-        where targets are positions relative to pelvis.
-        """
-        if not hasattr(self, "pose_sequence") or len(self.pose_sequence) == 0:
-            return
-        # expose controller time
         self.controller_time = t
-        if not hasattr(self, "pose_index"):
-            self.pose_index = 0
-            self.pose_elapsed = 0.0
-        self.pose_elapsed += dt
-        duration = self.pose_sequence[self.pose_index].get("duration", 1.0)
-        # pose progress (clamped to 0..1)
-        self.pose_progress = min(
-            1.0, self.pose_elapsed / duration if duration > 0 else 0.0
-        )
-        if self.pose_elapsed >= duration:
-            self.pose_elapsed = 0.0
-            self.pose_index = (self.pose_index + 1) % len(self.pose_sequence)
-        current_pose = self.pose_sequence[self.pose_index].get("targets", {})
-        pelvis = self.particles[0]
-        px, py = pelvis.x, pelvis.y
-        # compute prev/next targets on entering a new pose and interpolate each step (Option A + C)
-        if self._last_pose_index != self.pose_index:
-            # Build next_targets for all indices: use provided rel or current position
-            next_targets = {}
-            for i in range(len(self.particles)):
-                if isinstance(current_pose, dict) and i in current_pose:
-                    rel = current_pose[i]
-                    next_targets[i] = (px + rel[0], py + rel[1])
-                else:
-                    p = self.particles[i]
-                    next_targets[i] = (p.x, p.y)
-            # Build prev_targets from existing anchors or current positions
-            prev_targets = {}
-            for i in range(len(self.particles)):
-                if hasattr(self, "anchors") and i in self.anchors:
-                    a = self.anchors[i]
-                    prev_targets[i] = (a.x, a.y)
-                else:
-                    p = self.particles[i]
-                    prev_targets[i] = (p.x, p.y)
-            self.pose_prev_targets = prev_targets
-            self.pose_next_targets = next_targets
-            self._last_pose_index = self.pose_index
-        # Interpolate targets based on pose_progress and update anchors/current_targets
-        alpha = self.pose_progress
-        self.current_targets = {}
-        for i in range(len(self.particles)):
-            prev_x, prev_y = self.pose_prev_targets[i]
-            next_x, next_y = self.pose_next_targets[i]
-            ix = prev_x * (1.0 - alpha) + next_x * alpha
-            iy = prev_y * (1.0 - alpha) + next_y * alpha
-            if not hasattr(self, "anchors"):
-                self.anchors = {}
-            if i not in self.anchors:
-                anchor = Particle(ix, iy, 0.0, 0.0, 0.0)
-                self.world.add_particle(anchor)
-                self.anchors[i] = anchor
-            else:
-                anchor = self.anchors[i]
-                anchor.x = ix
-                anchor.y = iy
-            self.current_targets[i] = (ix, iy)
+        self.current_joint_targets = []
+        for params in self.joint_params:
+            base = params["rest_angle"]
+            if params["target_angle"] is not None:
+                base = params["target_angle"]
+            amp = params["amp"]
+            freq = params["freq"]
+            phase = params["phase"]
+            target = base + amp * math.sin(2.0 * math.pi * freq * t + phase)
+            self.current_joint_targets.append(target)
 
     def step_actuators(self, t: float, dt: float) -> float:
-        """Actuate cyclic muscles and PD-track pose targets if present.
+        """Apply joint spring-damper torques.
 
         Returns energy consumed during this timestep.
         """
         total_energy = 0.0
-        # cyclic limb muscles
         self.last_activations = []
-        for i, m in enumerate(self.muscle_edges):
-            c = m["constraint"]
-            params = m["params"]
-            phase = (i % 2) * 0.5
-            act = 0.5 * (
-                1.0
-                + __import__("math").sin(2 * __import__("math").pi * self.cycle_freq * t + phase)
+        if not self.current_joint_targets:
+            self.step_controller(t, dt)
+        for i, jdef in enumerate(self.joints):
+            joint = self.particles[jdef["joint"]]
+            left = self.particles[jdef["left"]]
+            right = self.particles[jdef["right"]]
+            params = self.joint_params[i]
+            target = self.current_joint_targets[i]
+            stiffness = params["stiffness"] * self.force_scale
+            damping = params["damping"] * self.force_scale
+            torque, err, energy = self.world.apply_joint_angle_pd(
+                joint, left, right, target, stiffness, damping, dt
             )
-            force = params["force_max"] * self.force_scale * act
-            # clamp upward component to avoid "flying" when muscles are too strong
-            dx = c.p2.x - c.p1.x
-            dy = c.p2.y - c.p1.y
-            dist = (dx * dx + dy * dy) ** 0.5
-            if dist != 0:
-                ux = dx / dist
-                uy = dy / dist
-                if uy > 0:
-                    # approximate mass of p1 (if p1 is the actuator) else use both
-                    m1 = 0.0 if c.p1.inv_mass == 0 else 1.0 / c.p1.inv_mass
-                    # max upward force allowed based on weight
-                    max_up_force = (
-                        m1 * abs(self.world.gravity[1]) * self.max_up_g_factor
-                    )
-                    # vertical component is force * uy
-                    if force * uy > max_up_force and uy > 0:
-                        force = max_up_force / uy
-            energy = self.world.muscle_pair(c.p1, c.p2, force, dt)
             total_energy += energy
+            scale = max(1e-6, abs(stiffness * (abs(params["amp"]) + 1e-3)))
+            activation = min(1.0, abs(torque) / scale)
             self.last_activations.append(
-                {"p1": c.p1, "p2": c.p2, "activation": act, "force": force}
+                {"p1": left, "p2": joint, "activation": activation, "force": abs(torque)}
             )
-        # PD controllers for pose targets
-        if hasattr(self, "current_targets") and len(self.current_targets) > 0:
-            pelvis = self.particles[0]
-            kp = 80.0 * self.force_scale
-            kd = 40.0 * self.force_scale
-            max_force = 200.0 * self.force_scale
-            for idx, (tx, ty) in self.current_targets.items():
-                if idx < 0 or idx >= len(self.particles):
-                    continue
-                p = self.particles[idx]
-                # update or create anchor particle at target position
-                if not hasattr(self, "anchors"):
-                    self.anchors = {}
-                if idx not in self.anchors:
-                    # create an anchor with small non-zero inverse mass so it falls under gravity
-                    anchor = Particle(tx, ty, 0.0, 0.0, self.anchor_inv_mass)
-                    self.world.add_particle(anchor)
-                    self.anchors[idx] = anchor
-                else:
-                    anchor = self.anchors[idx]
-                    anchor.x = tx
-                    anchor.y = ty
-                # compute direction toward anchor
-                dx = tx - p.x
-                dy = ty - p.y
-                dist = (dx * dx + dy * dy) ** 0.5
-                if dist == 0:
-                    continue
-                ux = dx / dist
-                uy = dy / dist
-                v_along = p.vx * ux + p.vy * uy
-                # apply deadzone to avoid chatter when very close
-                if dist < 0.02:
-                    force_mag = 0.0
-                else:
-                    force_mag = kp * dist - kd * v_along
-                    force_mag = max(-max_force, min(max_force, force_mag))
-                # clamp upward component to prevent launching
-                ux = ux
-                uy = uy
-                if uy > 0:
-                    m_p = 0.0 if p.inv_mass == 0 else 1.0 / p.inv_mass
-                    max_up_force = (
-                        m_p
-                        * abs(self.world.gravity[1])
-                        * self.max_up_g_factor
-                        * self.force_scale
-                    )
-                    if force_mag * uy > max_up_force:
-                        force_mag = max_up_force / uy
-                energy = self.world.muscle_pair(p, anchor, force_mag, dt)
-                total_energy += energy
-                self.last_activations.append(
-                    {
-                        "p1": p,
-                        "p2": anchor,
-                        "activation": abs(force_mag) / max_force,
-                        "force": abs(force_mag),
-                    }
-                )
-        # Balance assist: keep COM over support (feet) by applying small horizontal force to pelvis
-        if self.balance_assist:
-            try:
-                pelvis = self.particles[0]
-                # choose support points (knees act as feet in this simple model)
-                left_foot = self.particles[3]
-                right_foot = self.particles[4]
-                left_x = left_foot.x
-                right_x = right_foot.x
-                min_x = min(left_x, right_x)
-                max_x = max(left_x, right_x)
-                com_x, _ = self.world.center_of_mass()
-                # only correct if COM is outside support region (small deadzone)
-                tol = 0.02
-                target_x = None
-                if com_x < (min_x - tol):
-                    target_x = min_x
-                elif com_x > (max_x + tol):
-                    target_x = max_x
-                if target_x is not None:
-                    error_x = target_x - com_x
-                    # compute PD force and clamp
-                    max_bal = 200.0 * self.force_scale
-                    bal_force = self.balance_kp * error_x - self.balance_kd * pelvis.vx
-                    bal_force = max(-max_bal, min(max_bal, bal_force))
-                    # create or update pelvis support anchor (at target_x)
-                    if "pelvis_support" not in self.anchors:
-                        anchor = Particle(target_x, pelvis.y, 0.0, 0.0, self.anchor_inv_mass)
-                        self.world.add_particle(anchor)
-                        self.anchors["pelvis_support"] = anchor
-                    else:
-                        anchor = self.anchors["pelvis_support"]
-                        anchor.x = target_x
-                        anchor.y = pelvis.y
-                    energy = self.world.muscle_pair(pelvis, anchor, bal_force, dt)
-                    total_energy += energy
-                    self.last_activations.append(
-                        {
-                            "p1": pelvis,
-                            "p2": anchor,
-                            "activation": abs(bal_force) / max_bal,
-                            "force": abs(bal_force),
-                        }
-                    )
-            except Exception:
-                pass
+            self.last_activations.append(
+                {"p1": right, "p2": joint, "activation": activation, "force": abs(torque)}
+            )
         return total_energy
-
-    def set_pose_sequence(self, sequence):
-        """Set pose sequence: list of dicts { 'duration': float, 'targets': {idx:(x_rel,y_rel)} }.
-        targets are positions relative to pelvis.
-        """
-        self.pose_sequence = sequence
-        self.pose_index = 0
-        self.pose_elapsed = 0.0
 
     def center_of_mass(self):
         return self.world.center_of_mass()

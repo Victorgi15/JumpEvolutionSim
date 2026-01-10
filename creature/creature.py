@@ -1,9 +1,4 @@
-"""Build a two-segment creature in the physics World using the genome.
-
-We model each segment as a Particle pair (start/end) connected by a distance constraint.
-For simplicity a segment is represented by a single particle at its end; the 'root' is fixed at y=0 initially.
-Muscles are modelled as distance constraints whose target_length varies over time according to clocks.
-"""
+"""Build a chain creature with rigid bones and joint angle actuators."""
 
 from typing import Dict, List
 import math
@@ -17,6 +12,10 @@ class Creature:
         self.base_x = base_x
         self.particles: List[Particle] = []
         self.constraints: List[DistanceConstraint] = []
+        self.joints: List[tuple[int, int, int]] = []
+        self.joint_params: List[dict] = []
+        self.joint_rest_angles: List[float] = []
+        self.current_joint_targets: List[float] = []
         self._build()
 
     def _build(self):
@@ -42,55 +41,79 @@ class Creature:
             self.world.add_constraint(c)
             self.constraints.append(c)
 
-        # muscles: for simplicity each muscle controls the segment's current length target
-        # we keep references to the same DistanceConstraint objects and will update target_length
-        self.muscle_constraints = self.constraints[:]  # one per segment
+        # joints: internal nodes only
+        for i in range(1, len(self.particles) - 1):
+            self.joints.append((i, i - 1, i + 1))
+
+        # initialize joint params
+        self._init_joint_params()
+
+    def _init_joint_params(self):
+        defaults = self.genome.get("joint_params", [])
+        self.joint_params = []
+        self.joint_rest_angles = []
+        for i, (j_idx, l_idx, r_idx) in enumerate(self.joints):
+            joint = self.particles[j_idx]
+            left = self.particles[l_idx]
+            right = self.particles[r_idx]
+            rest_angle = self.world.joint_angle(joint, left, right)
+            params = defaults[i] if i < len(defaults) else {}
+            # set base values if missing
+            params = {
+                "rest_angle": params.get("rest_angle", rest_angle),
+                "amp": params.get("amp", 0.0),
+                "freq": params.get("freq", 1.5),
+                "phase": params.get("phase", 0.0),
+                "stiffness": params.get("stiffness", 6.0),
+                "damping": params.get("damping", 1.2),
+                "target_angle": params.get("target_angle", None),
+            }
+            self.joint_params.append(params)
+            self.joint_rest_angles.append(rest_angle)
+        self.cycle_freq = self.joint_params[0]["freq"] if self.joint_params else 1.0
 
     def step_controller(self, t: float, dt: float):
-        # update target lengths based on clocks
-        clocks = self.genome.get("clocks", [])
-        rest_factors = self.genome.get("rest_factors", [])
-        for i, c in enumerate(self.muscle_constraints):
-            L0 = self.genome["segments"][i]
-            clock = clocks[i]
-            amp = clock["amp"]
-            freq = clock["freq"]
-            phase = clock["phase"]
-            # sine wave modifies rest length factor
-            factor = 1.0 + amp * math.sin(2 * math.pi * freq * t + phase)
-            target = L0 * factor * rest_factors[i]
-            # interpolate to new target to simulate stiffness
-            c.target_length = target
+        # compute target angles for each joint
+        self.controller_time = t
+        self.current_joint_targets = []
+        for params in self.joint_params:
+            base = params["rest_angle"]
+            if params["target_angle"] is not None:
+                base = params["target_angle"]
+            amp = params["amp"]
+            freq = params["freq"]
+            phase = params["phase"]
+            target = base + amp * math.sin(2.0 * math.pi * freq * t + phase)
+            self.current_joint_targets.append(target)
 
     def step_actuators(self, t: float, dt: float) -> float:
-        """Activate muscles according to clocks and genome parameters.
+        """Apply joint spring-damper torques.
 
         Returns energy consumed during this timestep.
         """
         total_energy = 0.0
-        clocks = self.genome.get("clocks", [])
-        muscles = self.genome.get("muscles", [])
         self.last_activations = []
-        # for each segment, apply a linear muscle between its two endpoint particles
-        for i, c in enumerate(self.muscle_constraints):
-            # particles forming the constraint
-            p1 = c.p1
-            p2 = c.p2
-            clock = clocks[i]
-            muscle = muscles[i]
-            freq = clock["freq"]
-            phase = clock["phase"]
-            amp = clock.get("amp", 1.0)
-            # activation in [0,1]
-            sinv = math.sin(2 * math.pi * freq * t + phase)
-            activation = 0.5 * (1.0 + sinv)
-            # muscle force scaled by amplitude
-            force = muscle["force_max"] * activation * amp
-            energy = self.world.muscle_pair(p1, p2, force, dt)
+        if not self.current_joint_targets:
+            self.step_controller(t, dt)
+        for i, (j_idx, l_idx, r_idx) in enumerate(self.joints):
+            joint = self.particles[j_idx]
+            left = self.particles[l_idx]
+            right = self.particles[r_idx]
+            params = self.joint_params[i]
+            target = self.current_joint_targets[i]
+            stiffness = params["stiffness"]
+            damping = params["damping"]
+            torque, err, energy = self.world.apply_joint_angle_pd(
+                joint, left, right, target, stiffness, damping, dt
+            )
             total_energy += energy
-            # record for visualization
+            scale = max(1e-6, abs(stiffness * (abs(params["amp"]) + 1e-3)))
+            activation = min(1.0, abs(torque) / scale)
             self.last_activations.append(
-                {"p1": p1, "p2": p2, "activation": activation, "force": force}
+                {"p1": left, "p2": joint, "activation": activation, "force": abs(torque)}
+            )
+            self.last_activations.append(
+                {"p1": right, "p2": joint, "activation": activation, "force": abs(torque)}
             )
         return total_energy
 
