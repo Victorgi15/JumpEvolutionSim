@@ -1,6 +1,5 @@
 """Simple viewer for the World. Uses pygame if available, otherwise prints positions to console."""
 
-from typing import Optional
 import math
 
 try:
@@ -66,7 +65,7 @@ class Viewer:
             a = self.world_to_screen(c.p1.x, c.p1.y)
             b = self.world_to_screen(c.p2.x, c.p2.y)
             pygame.draw.line(self.screen, (200, 200, 200), a, b, 3)
-        # if a creature is provided and has muscle activation data, draw muscles
+        # if a creature is provided and has actuator activation data, draw them
         if self.creature is not None and hasattr(self.creature, "last_activations"):
             for m in self.creature.last_activations:
                 p1 = m["p1"]
@@ -83,15 +82,7 @@ class Viewer:
                 )
                 width = max(1, int(1 + force / 100.0))
                 pygame.draw.line(self.screen, col, a, b, width)
-        # draw pose targets if any
-        if self.creature is not None and hasattr(self.creature, "current_targets"):
-            for idx, (tx, ty) in self.creature.current_targets.items():
-                sx, sy = self.world_to_screen(tx, ty)
-                pygame.draw.circle(self.screen, (50, 200, 50), (sx, sy), 5)
-                pygame.draw.line(self.screen, (0, 0, 0), (sx - 4, sy), (sx + 4, sy), 1)
-                pygame.draw.line(self.screen, (0, 0, 0), (sx, sy - 4), (sx, sy + 4), 1)
-
-        # HUD: controller info and muscle stats
+        # HUD: controller info and actuator stats
         if self.creature is not None:
             hud_x, hud_y = 10, 10
             hud_w, hud_h = 260, 84
@@ -101,11 +92,9 @@ class Viewer:
             )
             # prepare lines
             lines = []
-            if hasattr(self.creature, "pose_index"):
-                prog = getattr(self.creature, "pose_progress", 0.0)
-                lines.append(f"Pose {self.creature.pose_index} {int(prog*100):d}%")
             if hasattr(self.creature, "controller_time"):
-                cycle_phase = (self.creature.controller_time * 1.5) % 1.0
+                freq = getattr(self.creature, "cycle_freq", 1.0)
+                cycle_phase = (self.creature.controller_time * freq) % 1.0
                 lines.append(f"Cycle {int(cycle_phase*100):d}%")
             if hasattr(self.creature, "force_scale"):
                 lines.append(f"Force scale {self.creature.force_scale:.2f}")
@@ -117,9 +106,9 @@ class Viewer:
                     self.creature.last_activations
                 )
                 max_f = max(m["force"] for m in self.creature.last_activations)
-                lines.append(f"AvgF {avg_f:.1f}N MaxF {max_f:.1f}N")
+                lines.append(f"AvgTau {avg_f:.1f} MaxTau {max_f:.1f}")
             else:
-                lines.append("No muscles active")
+                lines.append("No actuators active")
             # render text
             ty = hud_y + 6
             for ln in lines:
@@ -127,7 +116,7 @@ class Viewer:
                     txt = self.font.render(ln, True, (220, 220, 220))
                     self.screen.blit(txt, (hud_x + 6, ty))
                 ty += 18
-            # draw per-muscle force bars at midpoints
+            # draw per-actuator force bars at midpoints
             if (
                 hasattr(self.creature, "last_activations")
                 and len(self.creature.last_activations) > 0
