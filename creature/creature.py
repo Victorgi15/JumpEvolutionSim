@@ -62,5 +62,32 @@ class Creature:
             # interpolate to new target to simulate stiffness
             c.target_length = target
 
+    def step_actuators(self, t: float, dt: float) -> float:
+        """Activate muscles according to clocks and genome parameters.
+
+        Returns energy consumed during this timestep.
+        """
+        total_energy = 0.0
+        clocks = self.genome.get("clocks", [])
+        muscles = self.genome.get("muscles", [])
+        # for each segment, apply a linear muscle between its two endpoint particles
+        for i, c in enumerate(self.muscle_constraints):
+            # particles forming the constraint
+            p1 = c.p1
+            p2 = c.p2
+            clock = clocks[i]
+            muscle = muscles[i]
+            freq = clock["freq"]
+            phase = clock["phase"]
+            amp = clock.get("amp", 1.0)
+            # activation in [0,1]
+            sinv = math.sin(2 * math.pi * freq * t + phase)
+            activation = 0.5 * (1.0 + sinv)
+            # muscle force scaled by amplitude
+            force = muscle["force_max"] * activation * amp
+            energy = self.world.muscle_pair(p1, p2, force, dt)
+            total_energy += energy
+        return total_energy
+
     def center_of_mass(self):
         return self.world.center_of_mass()

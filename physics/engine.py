@@ -164,13 +164,13 @@ class World:
             j = dv / wsum
             jx = j * nx
             jy = j * ny
-            # apply opposite impulses
+            # apply velocity changes Δv = ± j * inv_mass
             if p1.inv_mass != 0:
-                p1.vx -= jx * (1.0 / p1.inv_mass)
-                p1.vy -= jy * (1.0 / p1.inv_mass)
+                p1.vx -= jx * w1
+                p1.vy -= jy * w1
             if p2.inv_mass != 0:
-                p2.vx += jx * (1.0 / p2.inv_mass)
-                p2.vy += jy * (1.0 / p2.inv_mass)
+                p2.vx += jx * w2
+                p2.vy += jy * w2
 
     def Contract(
         self, top: Particle, left: Particle, right: Particle, force: float, dt: float
@@ -212,6 +212,37 @@ class World:
 
         # apply opposite impulse to top to conserve momentum
         top.apply_impulse(-total_ix, -total_iy)
+
+    def muscle_pair(self, p1: Particle, p2: Particle, force: float, dt: float) -> float:
+        """Apply a linear muscle between two particles.
+
+        - force: peak force (N) pulling p1 towards p2 and p2 towards p1
+        - dt: timestep
+        Returns an estimate of the energy consumed during this step (work = force * velocity_along * dt)
+        """
+        dx = p2.x - p1.x
+        dy = p2.y - p1.y
+        dist = math.hypot(dx, dy)
+        if dist == 0:
+            return 0.0
+        nx = dx / dist
+        ny = dy / dist
+        # relative velocity along the link direction (positive if p2 moving away from p1)
+        rvx = p2.vx - p1.vx
+        rvy = p2.vy - p1.vy
+        v_rel = rvx * nx + rvy * ny
+        # impulse magnitude
+        J = force * dt
+        ix = J * nx
+        iy = J * ny
+        # apply impulses (p1 receives +, p2 receives -)
+        p1.apply_impulse(ix, iy)
+        p2.apply_impulse(-ix, -iy)
+        # energy ~ positive work done by muscle: force * contraction_speed * dt
+        # contraction speed is -v_rel when v_rel < 0 (closing). Only positive work counts.
+        contraction_speed = max(0.0, -v_rel)
+        energy = force * contraction_speed * dt
+        return energy
 
     def SetLength(self, constraint: DistanceConstraint, new_length: float):
         """Set target length for a constraint and update masses of attached particles based on
