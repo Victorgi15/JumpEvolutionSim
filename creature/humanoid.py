@@ -8,7 +8,9 @@ from physics.engine import Particle, DistanceConstraint, World
 
 
 class HumanoidCreature:
-    def __init__(self, genome: Dict, world: World, base_x=0.0, force_scale: float = 1.0):
+    def __init__(
+        self, genome: Dict, world: World, base_x=0.0, force_scale: float = 1.0
+    ):
         self.genome = genome
         self.world = world
         self.base_x = base_x
@@ -16,6 +18,10 @@ class HumanoidCreature:
         self.particles: List[Particle] = []
         self.constraints: List[DistanceConstraint] = []
         self.muscle_edges = []
+        # controller diagnostics
+        self.controller_time = 0.0
+        self.pose_progress = 0.0
+        self._last_pose_index = None
         self._build()
 
     def _build(self):
