@@ -14,6 +14,7 @@ class HumanoidCreature:
         world: World,
         base_x=0.0,
         force_scale: float = 1.0,
+        cycle_freq: float = 1.5,
         balance_assist: bool = True,
         balance_kp: float = 80.0,
         balance_kd: float = 10.0,
@@ -24,6 +25,8 @@ class HumanoidCreature:
         self.world = world
         self.base_x = base_x
         self.force_scale = force_scale
+        # muscle cycle frequency (Hz)
+        self.cycle_freq = cycle_freq
         # balance assist params
         self.balance_assist = balance_assist
         self.balance_kp = balance_kp
@@ -180,7 +183,7 @@ class HumanoidCreature:
             phase = (i % 2) * 0.5
             act = 0.5 * (
                 1.0
-                + __import__("math").sin(2 * __import__("math").pi * 1.5 * t + phase)
+                + __import__("math").sin(2 * __import__("math").pi * self.cycle_freq * t + phase)
             )
             force = params["force_max"] * self.force_scale * act
             # clamp upward component to avoid "flying" when muscles are too strong

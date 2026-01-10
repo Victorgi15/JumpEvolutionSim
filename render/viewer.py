@@ -96,7 +96,9 @@ class Viewer:
             hud_x, hud_y = 10, 10
             hud_w, hud_h = 260, 84
             pygame.draw.rect(self.screen, (20, 20, 20), (hud_x, hud_y, hud_w, hud_h))
-            pygame.draw.rect(self.screen, (60, 60, 60), (hud_x + 2, hud_y + 2, hud_w - 4, hud_h - 4))
+            pygame.draw.rect(
+                self.screen, (60, 60, 60), (hud_x + 2, hud_y + 2, hud_w - 4, hud_h - 4)
+            )
             # prepare lines
             lines = []
             if hasattr(self.creature, "pose_index"):
@@ -107,7 +109,10 @@ class Viewer:
                 lines.append(f"Cycle {int(cycle_phase*100):d}%")
             if hasattr(self.creature, "force_scale"):
                 lines.append(f"Force scale {self.creature.force_scale:.2f}")
-            if hasattr(self.creature, "last_activations") and len(self.creature.last_activations) > 0:
+            if (
+                hasattr(self.creature, "last_activations")
+                and len(self.creature.last_activations) > 0
+            ):
                 avg_f = sum(m["force"] for m in self.creature.last_activations) / len(
                     self.creature.last_activations
                 )
@@ -123,7 +128,10 @@ class Viewer:
                     self.screen.blit(txt, (hud_x + 6, ty))
                 ty += 18
             # draw per-muscle force bars at midpoints
-            if hasattr(self.creature, "last_activations") and len(self.creature.last_activations) > 0:
+            if (
+                hasattr(self.creature, "last_activations")
+                and len(self.creature.last_activations) > 0
+            ):
                 forces = [m["force"] for m in self.creature.last_activations]
                 max_force = max(forces) if forces else 1.0
                 for m in self.creature.last_activations:
