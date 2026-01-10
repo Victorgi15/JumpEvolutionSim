@@ -18,6 +18,7 @@ class HumanoidCreature:
         balance_kp: float = 80.0,
         balance_kd: float = 10.0,
         max_up_g_factor: float = 2.5,
+        anchor_inv_mass: float = 0.02,
     ):
         self.genome = genome
         self.world = world
@@ -29,6 +30,8 @@ class HumanoidCreature:
         self.balance_kd = balance_kd
         # maximum upward force allowed in multiples of weight (mass * g)
         self.max_up_g_factor = max_up_g_factor
+        # anchor inverse mass (small but non-zero -> anchors are affected by gravity but resist muscle impulses)
+        self.anchor_inv_mass = anchor_inv_mass
         self.particles: List[Particle] = []
         self.constraints: List[DistanceConstraint] = []
         self.muscle_edges = []
@@ -120,12 +123,48 @@ class HumanoidCreature:
         current_pose = self.pose_sequence[self.pose_index].get("targets", {})
         pelvis = self.particles[0]
         px, py = pelvis.x, pelvis.y
-        # compute world targets only when entering a new pose so targets stay fixed in world frame
+        # compute prev/next targets on entering a new pose and interpolate each step (Option A + C)
         if self._last_pose_index != self.pose_index:
-            self.current_targets = {}
-            for idx, rel in current_pose.items():
-                self.current_targets[int(idx)] = (px + rel[0], py + rel[1])
+            # Build next_targets for all indices: use provided rel or current position
+            next_targets = {}
+            for i in range(len(self.particles)):
+                if isinstance(current_pose, dict) and i in current_pose:
+                    rel = current_pose[i]
+                    next_targets[i] = (px + rel[0], py + rel[1])
+                else:
+                    p = self.particles[i]
+                    next_targets[i] = (p.x, p.y)
+            # Build prev_targets from existing anchors or current positions
+            prev_targets = {}
+            for i in range(len(self.particles)):
+                if hasattr(self, "anchors") and i in self.anchors:
+                    a = self.anchors[i]
+                    prev_targets[i] = (a.x, a.y)
+                else:
+                    p = self.particles[i]
+                    prev_targets[i] = (p.x, p.y)
+            self.pose_prev_targets = prev_targets
+            self.pose_next_targets = next_targets
             self._last_pose_index = self.pose_index
+        # Interpolate targets based on pose_progress and update anchors/current_targets
+        alpha = self.pose_progress
+        self.current_targets = {}
+        for i in range(len(self.particles)):
+            prev_x, prev_y = self.pose_prev_targets[i]
+            next_x, next_y = self.pose_next_targets[i]
+            ix = prev_x * (1.0 - alpha) + next_x * alpha
+            iy = prev_y * (1.0 - alpha) + next_y * alpha
+            if not hasattr(self, "anchors"):
+                self.anchors = {}
+            if i not in self.anchors:
+                anchor = Particle(ix, iy, 0.0, 0.0, 0.0)
+                self.world.add_particle(anchor)
+                self.anchors[i] = anchor
+            else:
+                anchor = self.anchors[i]
+                anchor.x = ix
+                anchor.y = iy
+            self.current_targets[i] = (ix, iy)
 
     def step_actuators(self, t: float, dt: float) -> float:
         """Actuate cyclic muscles and PD-track pose targets if present.
@@ -155,7 +194,9 @@ class HumanoidCreature:
                     # approximate mass of p1 (if p1 is the actuator) else use both
                     m1 = 0.0 if c.p1.inv_mass == 0 else 1.0 / c.p1.inv_mass
                     # max upward force allowed based on weight
-                    max_up_force = m1 * abs(self.world.gravity[1]) * self.max_up_g_factor
+                    max_up_force = (
+                        m1 * abs(self.world.gravity[1]) * self.max_up_g_factor
+                    )
                     # vertical component is force * uy
                     if force * uy > max_up_force and uy > 0:
                         force = max_up_force / uy
@@ -178,8 +219,8 @@ class HumanoidCreature:
                 if not hasattr(self, "anchors"):
                     self.anchors = {}
                 if idx not in self.anchors:
-                    # create a fixed anchor (inv_mass=0) so it doesn't move and acts as target
-                    anchor = Particle(tx, ty, 0.0, 0.0, 0.0)
+                    # create an anchor with small non-zero inverse mass so it falls under gravity
+                    anchor = Particle(tx, ty, 0.0, 0.0, self.anchor_inv_mass)
                     self.world.add_particle(anchor)
                     self.anchors[idx] = anchor
                 else:
@@ -206,7 +247,12 @@ class HumanoidCreature:
                 uy = uy
                 if uy > 0:
                     m_p = 0.0 if p.inv_mass == 0 else 1.0 / p.inv_mass
-                    max_up_force = m_p * abs(self.world.gravity[1]) * self.max_up_g_factor * self.force_scale
+                    max_up_force = (
+                        m_p
+                        * abs(self.world.gravity[1])
+                        * self.max_up_g_factor
+                        * self.force_scale
+                    )
                     if force_mag * uy > max_up_force:
                         force_mag = max_up_force / uy
                 energy = self.world.muscle_pair(p, anchor, force_mag, dt)
@@ -246,7 +292,7 @@ class HumanoidCreature:
                     bal_force = max(-max_bal, min(max_bal, bal_force))
                     # create or update pelvis support anchor (at target_x)
                     if "pelvis_support" not in self.anchors:
-                        anchor = Particle(target_x, pelvis.y, 0.0, 0.0, 0.0)
+                        anchor = Particle(target_x, pelvis.y, 0.0, 0.0, self.anchor_inv_mass)
                         self.world.add_particle(anchor)
                         self.anchors["pelvis_support"] = anchor
                     else:
