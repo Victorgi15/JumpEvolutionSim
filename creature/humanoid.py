@@ -121,8 +121,8 @@ class HumanoidCreature:
         # PD controllers for pose targets
         if hasattr(self, "current_targets") and len(self.current_targets) > 0:
             pelvis = self.particles[0]
-            kp = 80.0
-            kd = 40.0
+            kp = 80.0 * self.force_scale
+            kd = 40.0 * self.force_scale
             max_force = 200.0 * self.force_scale
             for idx, (tx, ty) in self.current_targets.items():
                 if idx < 0 or idx >= len(self.particles):
