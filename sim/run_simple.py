@@ -1,7 +1,6 @@
-"""Run a simple simulation for 5 seconds with a default genome creature and report max COM height."""
+"""Run a simple simulation for 5 seconds with a joint-angle creature and report max COM height."""
 
-import time
-from physics.engine import World, Particle
+from physics.engine import World
 from creature.genome import default_genome
 from creature.creature import Creature
 
@@ -29,7 +28,7 @@ def evaluate(
     for i in range(steps):
         # controller update
         c.step_controller(t, dt)
-        # actuators: apply muscle forces and accumulate energy
+        # actuators: apply joint torques and accumulate energy
         energy += c.step_actuators(t, dt)
         # step world
         world.step(dt)

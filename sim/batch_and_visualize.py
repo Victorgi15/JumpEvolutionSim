@@ -1,19 +1,13 @@
-"""Run many randomized humanoid simulations and visualize the top-k by max pelvis height.
-
-Usage:
-    python sim/batch_and_visualize.py --n 1000 --duration 1.0 --dt 1/240 --seed 0 --topk 3
-
-This will run `n` simulations with random parameters (force_scale, cycle_freq, pose targets) and
-select the top-k runs by maximum pelvis height. It then replays the top-k side-by-side in a single Pygame window.
-"""
+"""Run many randomized humanoid simulations and visualize the top-k by max pelvis height."""
 
 import sys
+
 # ensure project root is on sys.path when running this script directly
-sys.path.insert(0, '.')
+sys.path.insert(0, ".")
 import random
 import argparse
 import math
-import time
+import json
 from physics.engine import World
 from creature.humanoid import HumanoidCreature
 
@@ -23,35 +17,34 @@ except Exception:
     pygame = None
 
 
-def random_pose(rng, num_particles):
-    # generate a single pose: dict of index->(x_rel, y_rel)
-    pose = {}
-    for i in range(num_particles):
-        # with some probability leave it unspecified
-        if rng.random() < 0.6:
-            x = rng.uniform(-0.5, 0.5)
-            y = rng.uniform(-0.2, 1.2)
-            pose[i] = (x, y)
-    return pose
+def random_joint_params(rng, num_joints, amp_min, amp_max, cycle_freq, stiffness, damping):
+    params = []
+    for _ in range(num_joints):
+        params.append(
+            {
+                "amp": rng.uniform(amp_min, amp_max),
+                "phase": rng.uniform(0.0, 2.0 * math.pi),
+                "freq": cycle_freq,
+                "stiffness": stiffness,
+                "damping": damping,
+            }
+        )
+    return params
 
 
-def run_sim(seed, duration, dt, force_scale, cycle_freq, balance_assist, pose):
+def run_sim(duration, dt, force_scale, cycle_freq, joint_params):
     w = World()
     w.dt = dt
+    genome = {"joint_params": joint_params, "cycle_freq": cycle_freq}
     h = HumanoidCreature(
-        {},
+        genome,
         w,
         base_x=0.0,
         force_scale=force_scale,
         cycle_freq=cycle_freq,
-        balance_assist=balance_assist,
     )
-    # disable cyclic limb muscles to focus on pose pulls
-    h.muscle_edges = []
-    h.set_pose_sequence([{"duration": duration, "targets": pose}])
     steps = int(duration / dt)
     max_pelvis = -1e9
-    # run
     for i in range(steps):
         t = i * dt
         h.step_controller(t, dt)
@@ -62,23 +55,19 @@ def run_sim(seed, duration, dt, force_scale, cycle_freq, balance_assist, pose):
 
 
 def record_sim(duration, dt, params):
-    # re-run simulation and record frames (particle positions + activations)
     force_scale = params["force_scale"]
     cycle_freq = params["cycle_freq"]
-    pose = params["pose"]
-    balance_assist = params.get("balance_assist", True)
+    joint_params = params["joint_params"]
     w = World()
     w.dt = dt
+    genome = {"joint_params": joint_params, "cycle_freq": cycle_freq}
     h = HumanoidCreature(
-        {},
+        genome,
         w,
         base_x=0.0,
         force_scale=force_scale,
         cycle_freq=cycle_freq,
-        balance_assist=balance_assist,
     )
-    h.muscle_edges = []
-    h.set_pose_sequence([{"duration": duration, "targets": pose}])
     steps = int(duration / dt)
     frames = []
     for i in range(steps):
@@ -86,19 +75,8 @@ def record_sim(duration, dt, params):
         h.step_controller(t, dt)
         h.step_actuators(t, dt)
         w.step(dt)
-        # snapshot
         pts = [(p.x, p.y, p.inv_mass) for p in w.particles]
-        acts = [
-            {
-                "p1": a["p1"],
-                "p2": a["p2"],
-                "activation": a["activation"],
-                "force": a["force"],
-            }
-            for a in getattr(h, "last_activations", [])
-        ]
-        targets = dict(getattr(h, "current_targets", {}))
-        frames.append({"particles": pts, "activations": acts, "targets": targets})
+        frames.append({"particles": pts})
     return frames
 
 
@@ -111,60 +89,61 @@ def visualize_three(frames_list, dt, scale=200.0):
     height = 420
     screen = pygame.display.set_mode((width, height))
     clock = pygame.time.Clock()
-    n = len(frames_list)
-    cols = n
-    rows = 1
+    cols = len(frames_list)
     cell_w = width // cols
-    cell_h = height // rows
+    cell_h = height
     running = True
     steps = min(len(f) for f in frames_list)
     step = 0
-    while running and step < steps:
+    finished = False
+    while running:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_r:
+                    step = 0
+                    finished = False
+                elif event.key == pygame.K_q:
+                    running = False
         screen.fill((30, 30, 30))
-        for i, frames in enumerate(frames_list):
-            frame = frames[step]
-            # draw background and ground
-            vx = i * cell_w
-            vy = 0
-            gy = vy + cell_h - 40
-            pygame.draw.rect(screen, (50, 120, 50), (vx, gy, cell_w, 40))
-            # draw constraints as lines between particle indices
-            pts = frame["particles"]
-            # we know humanoid topology: edges are hardcoded ordering
-            edges = [
-                (0, 1),
-                (0, 2),
-                (1, 3),
-                (2, 4),
-                (0, 5),
-                (5, 6),
-                (5, 7),
-                (6, 8),
-                (7, 9),
-            ]
-            for a, b in edges:
-                x1 = vx + int(cell_w / 2 + pts[a][0] * scale)
-                y1 = vy + int(cell_h - 80 - pts[a][1] * scale)
-                x2 = vx + int(cell_w / 2 + pts[b][0] * scale)
-                y2 = vy + int(cell_h - 80 - pts[b][1] * scale)
-                pygame.draw.line(screen, (200, 200, 200), (x1, y1), (x2, y2), 3)
-            # draw particles
-            for p in pts:
-                x = vx + int(cell_w / 2 + p[0] * scale)
-                y = vy + int(cell_h - 80 - p[1] * scale)
-                col = (200, 50, 50) if p[2] != 0 else (100, 100, 100)
-                pygame.draw.circle(screen, col, (x, y), 6)
-            # draw targets
-            for idx, (tx, ty) in frame["targets"].items():
-                sx = vx + int(cell_w / 2 + tx * scale)
-                sy = vy + int(cell_h - 80 - ty * scale)
-                pygame.draw.circle(screen, (50, 200, 50), (sx, sy), 4)
-        pygame.display.flip()
-        clock.tick(1.0 / dt if dt > 0 else 60)
-        step += 1
+        if not finished and step < steps:
+            for i, frames in enumerate(frames_list):
+                frame = frames[step]
+                vx = i * cell_w
+                vy = 0
+                gy = vy + cell_h - 40
+                pygame.draw.rect(screen, (50, 120, 50), (vx, gy, cell_w, 40))
+                pts = frame["particles"]
+                edges = [
+                    (0, 1),
+                    (0, 2),
+                    (1, 3),
+                    (2, 4),
+                    (0, 5),
+                    (5, 6),
+                    (5, 7),
+                    (6, 8),
+                    (7, 9),
+                ]
+                for a, b in edges:
+                    x1 = vx + int(cell_w / 2 + pts[a][0] * scale)
+                    y1 = vy + int(cell_h - 80 - pts[a][1] * scale)
+                    x2 = vx + int(cell_w / 2 + pts[b][0] * scale)
+                    y2 = vy + int(cell_h - 80 - pts[b][1] * scale)
+                    pygame.draw.line(screen, (200, 200, 200), (x1, y1), (x2, y2), 3)
+                for p in pts:
+                    x = vx + int(cell_w / 2 + p[0] * scale)
+                    y = vy + int(cell_h - 80 - p[1] * scale)
+                    col = (200, 50, 50) if p[2] != 0 else (100, 100, 100)
+                    pygame.draw.circle(screen, col, (x, y), 6)
+            pygame.display.flip()
+            clock.tick(1.0 / dt if dt > 0 else 60)
+            step += 1
+            if step >= steps:
+                finished = True
+        else:
+            clock.tick(30)
     pygame.quit()
 
 
@@ -176,37 +155,75 @@ def main():
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--topk", type=int, default=3)
     p.add_argument("--quiet", action="store_true")
+    p.add_argument("--force-scale", type=float, default=1.0)
+    p.add_argument("--cycle-freq", type=float, default=1.5)
+    p.add_argument("--amp-min", type=float, default=0.1)
+    p.add_argument("--amp-max", type=float, default=0.6)
+    p.add_argument("--stiffness", type=float, default=6.0)
+    p.add_argument("--damping", type=float, default=1.2)
+    p.add_argument("--save-json", type=str, default=None)
+    p.add_argument("--replay-file", type=str, default=None)
+    p.add_argument("--replay-index", type=int, default=0)
+
     args = p.parse_args()
+
+    if args.replay_file is not None:
+        with open(args.replay_file, "r") as f:
+            saved = json.load(f)
+        if args.replay_index < 0 or args.replay_index >= len(saved):
+            print("replay-index out of range")
+            return
+        r = saved[args.replay_index]
+        frames = record_sim(args.duration, args.dt, r)
+        visualize_three([frames], args.dt)
+        return
+
     rng = random.Random(args.seed)
     results = []
     for i in range(args.n):
-        fs = rng.uniform(0.5, 5.0)
-        cf = rng.uniform(0.5, 3.0)
-        pose = random_pose(rng, 10)
-        mx = run_sim(args.seed + i, args.duration, args.dt, fs, cf, True, pose)
+        joint_params = random_joint_params(
+            rng,
+            num_joints=4,
+            amp_min=args.amp_min,
+            amp_max=args.amp_max,
+            cycle_freq=args.cycle_freq,
+            stiffness=args.stiffness,
+            damping=args.damping,
+        )
+        mx = run_sim(
+            args.duration,
+            args.dt,
+            args.force_scale,
+            args.cycle_freq,
+            joint_params,
+        )
         results.append(
             {
                 "index": i,
                 "max_pelvis": mx,
-                "force_scale": fs,
-                "cycle_freq": cf,
-                "pose": pose,
+                "force_scale": args.force_scale,
+                "cycle_freq": args.cycle_freq,
+                "joint_params": joint_params,
             }
         )
         if not args.quiet and (i % max(1, args.n // 10) == 0):
-            print(f"run {i}/{args.n} max_pelvis={mx:.3f} fs={fs:.2f} cf={cf:.2f}")
-    # pick topk
+            print(f"run {i}/{args.n} max_pelvis={mx:.3f}")
+
     results.sort(key=lambda r: r["max_pelvis"], reverse=True)
     topk = results[: args.topk]
     print("Top K results:")
     for j, r in enumerate(topk):
         print(j + 1, r["max_pelvis"], r["force_scale"], r["cycle_freq"])
-    # re-run topk and record frames
+
+    if args.save_json is not None:
+        with open(args.save_json, "w") as f:
+            json.dump(results, f)
+        print(f"Saved results to {args.save_json}")
+
     frames_list = []
     for r in topk:
         frames = record_sim(args.duration, args.dt, r)
         frames_list.append(frames)
-    # visualize side-by-side
     visualize_three(frames_list, args.dt)
 
 
