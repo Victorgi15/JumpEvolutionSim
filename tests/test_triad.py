@@ -1,4 +1,5 @@
 import math
+import random
 import sys
 from pathlib import Path
 
@@ -385,6 +386,84 @@ def test_evolve_tetrad_evaluates_population():
     assert all(0.1 <= result.genome.clock_hz <= 2.0 for result in results)
     assert all("score" in result.metrics for result in results)
     assert best.metrics["score"] == max(result.metrics["score"] for result in results)
+
+
+def test_evolve_tetrad_selects_and_mutates_population():
+    rng = random.Random(1)
+    results = evolve_tetrad.evaluate_population(
+        population_size=10,
+        duration=0.05,
+        seed=123,
+    )
+    selected = evolve_tetrad.select_best(results, selection_ratio=0.2)
+    next_gen = evolve_tetrad.next_generation(
+        selected,
+        population_size=10,
+        rng=rng,
+        mutation_rate=1.0,
+        angle_sigma=5.0,
+        clock_sigma=0.1,
+        immigrant_ratio=0.2,
+    )
+
+    assert len(selected) == 2
+    assert len(next_gen) == 10
+    assert 0.1 <= next_gen[-1].clock_hz <= 2.0
+    assert any(
+        next_gen[-1].positions[index].pivot_targets_deg
+        != selected[0].genome.positions[index].pivot_targets_deg
+        for index in range(3)
+    )
+
+
+def test_evolve_tetrad_logs_top_three_per_generation():
+    log_path = ROOT / "logs" / "test_evolve_tetrad.jsonl"
+    log_path.unlink(missing_ok=True)
+    results = evolve_tetrad.evolve_population(
+        population_size=5,
+        generations=2,
+        duration=0.05,
+        seed=123,
+        selection_ratio=0.4,
+        log_path=log_path,
+    )
+    lines = log_path.read_text(encoding="utf-8").strip().splitlines()
+
+    assert len(results) == 5
+    assert len(lines) == 6
+    assert '"generation": 1' in lines[0]
+    assert '"rank": 1' in lines[0]
+    assert '"genome"' in lines[0]
+    log_path.unlink(missing_ok=True)
+
+
+def test_evolve_tetrad_injects_random_immigrants():
+    rng = random.Random(2)
+    parent = evolve_tetrad.CandidateResult(
+        1,
+        visualize_tetrad.TetradGenome(
+            [
+                visualize_tetrad.Position([10.0, 20.0]),
+                visualize_tetrad.Position([30.0, 40.0]),
+                visualize_tetrad.Position([50.0, 60.0]),
+            ],
+            0.5,
+        ),
+        {"score": 1.0},
+    )
+
+    next_gen = evolve_tetrad.next_generation(
+        [parent],
+        population_size=5,
+        rng=rng,
+        mutation_rate=0.0,
+        immigrant_ratio=0.4,
+    )
+
+    assert next_gen[0].clock_hz == pytest.approx(0.5)
+    assert next_gen[1].clock_hz == pytest.approx(0.5)
+    assert next_gen[2].clock_hz == pytest.approx(0.5)
+    assert any(genome.clock_hz != pytest.approx(0.5) for genome in next_gen[3:])
 
 
 def test_visualize_tetrad_uses_supplied_genome(monkeypatch):

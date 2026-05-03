@@ -15,6 +15,14 @@ Try the first random tetrad population:
 
     python -m sim.evolve_tetrad
 
+Run several evolution generations:
+
+    python -m sim.evolve_tetrad --population 1000 --generations 20 --duration 10 --seed 42
+
+Each generation logs its top three candidates to logs/evolve_tetrad.jsonl by
+default. New random immigrants are injected at each generation to preserve
+exploration; the default immigrant ratio is 10%.
+
 Adjust the tetrad first position pivot target angles:
 
     python -m sim.visualize_tetrad --angle1 72 --angle2 138
