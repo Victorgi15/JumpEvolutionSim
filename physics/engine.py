@@ -1,12 +1,8 @@
-"""Minimal physics engine: particles + distance constraints + simple ground collision.
-
-This is a simple Position-Based Dynamics-like solver (iterative constraint projection)
-with semi-implicit Euler integration for velocities.
-"""
+"""Minimal 2D physics for a particle triad."""
 
 from dataclasses import dataclass
-from typing import List, Tuple
 import math
+from typing import List, Tuple
 
 
 @dataclass
@@ -17,7 +13,7 @@ class Particle:
     vy: float
     inv_mass: float
 
-    def apply_impulse(self, ix: float, iy: float):
+    def apply_impulse(self, ix: float, iy: float) -> None:
         if self.inv_mass == 0:
             return
         self.vx += ix * self.inv_mass
@@ -31,29 +27,26 @@ class DistanceConstraint:
         p2: Particle,
         target_length: float,
         stiffness: float = 1.0,
-        compliance: float = 0.0,
     ):
         self.p1 = p1
         self.p2 = p2
         self.target_length = target_length
         self.stiffness = stiffness
-        # compliance between 0 (rigid) and 1 (fully compliant)
-        self.compliance = compliance
 
-    def solve(self):
+    def solve(self) -> None:
         dx = self.p2.x - self.p1.x
         dy = self.p2.y - self.p1.y
         dist = math.hypot(dx, dy)
         if dist == 0:
             return
-        error = dist - self.target_length
-        # positional correction distributed by inverse mass
+
         w1 = self.p1.inv_mass
         w2 = self.p2.inv_mass
         wsum = w1 + w2
         if wsum == 0:
             return
-        correction = (error / dist) * self.stiffness
+
+        correction = ((dist - self.target_length) / dist) * self.stiffness
         corrx = dx * correction
         corry = dy * correction
         if w1 > 0:
@@ -70,90 +63,43 @@ class World:
         self.constraints: List[DistanceConstraint] = []
         self.gravity = gravity
         self.dt = 1 / 120.0
-        self.substeps = 1
         self.iterations = 8
         self.restitution = 0.0
         self.friction = 0.8
 
-    def add_particle(self, p: Particle):
+    def add_particle(self, p: Particle) -> Particle:
         self.particles.append(p)
         return p
 
-    def add_constraint(self, c: DistanceConstraint):
+    def add_constraint(self, c: DistanceConstraint) -> DistanceConstraint:
         self.constraints.append(c)
         return c
 
-    def step(self, dt=None):
+    def step(self, dt: float | None = None) -> None:
         if dt is None:
             dt = self.dt
-        # high-level step decomposition
-        self.Gravity(dt)
 
-        # velocity-level link constraint should be applied BEFORE movement to prevent
-        # velocities from causing immediate stretch during the position integration.
+        self._apply_gravity(dt)
         for _ in range(self.iterations):
-            self.Link()
+            self._solve_link_velocities()
 
-        # integrate positions
-        self.Movement(dt)
-
-        # positional constraint solver (to correct residuals)
+        self._integrate(dt)
         for _ in range(self.iterations):
             for c in self.constraints:
                 c.solve()
 
-        # simple ground collision and friction (y=0 ground)
-        for p in self.particles:
-            if p.y < 0:
-                p.y = 0
-                if p.vy < 0:
-                    p.vy = -p.vy * self.restitution
-                p.vx *= self.friction
+        self._collide_with_ground()
+        self._damp_velocities()
 
-        # small global damping to reduce numerical oscillations (keeps system stable)
-        damping = 0.998
+    def _apply_gravity(self, dt: float) -> None:
+        gx, gy = self.gravity
         for p in self.particles:
             if p.inv_mass == 0:
                 continue
-            p.vx *= damping
-            p.vy *= damping
+            p.vx += gx * dt
+            p.vy += gy * dt
 
-    def center_of_mass(self):
-        sx = sy = sm = 0.0
-        for p in self.particles:
-            m = 0.0 if p.inv_mass == 0 else 1.0 / p.inv_mass
-            sx += p.x * m
-            sy += p.y * m
-            sm += m
-        if sm == 0:
-            return (0.0, 0.0)
-        return (sx / sm, sy / sm)
-
-    # --- New helper primitives requested ---
-    def Movement(self, dt: float):
-        """Integrate particle positions from velocities (semi-implicit handled in Gravity)."""
-        for p in self.particles:
-            # fixed particles (inv_mass == 0) do not move
-            if p.inv_mass == 0:
-                continue
-            p.x += p.vx * dt
-            p.y += p.vy * dt
-
-    def Gravity(self, dt: float):
-        """Apply gravity to particle velocities."""
-        g_x, g_y = self.gravity
-        for p in self.particles:
-            if p.inv_mass == 0:
-                continue
-            p.vx += g_x * dt
-            p.vy += g_y * dt
-
-    def Link(self):
-        """Velocity-level constraint: remove relative velocity along link direction to avoid length change.
-
-        Applies per-constraint compliance (c.compliance) and runs for `self.iterations`.
-        """
-        # iterate to improve enforcement
+    def _solve_link_velocities(self) -> None:
         for c in self.constraints:
             p1 = c.p1
             p2 = c.p2
@@ -162,31 +108,51 @@ class World:
             dist = math.hypot(dx, dy)
             if dist == 0:
                 continue
+
             nx = dx / dist
             ny = dy / dist
-            # relative velocity along the link
-            rvx = p2.vx - p1.vx
-            rvy = p2.vy - p1.vy
-            v_rel = rvx * nx + rvy * ny
-            # compute impulse (velocity correction) to reduce that component
+            relative_vx = p2.vx - p1.vx
+            relative_vy = p2.vy - p1.vy
+            relative_speed = relative_vx * nx + relative_vy * ny
+
             w1 = p1.inv_mass
             w2 = p2.inv_mass
             wsum = w1 + w2
             if wsum == 0:
                 continue
-            # desired change depends on compliance of this constraint
-            dv = -v_rel * (1.0 - c.compliance)
-            # convert dv to impulses for each particle: J = dv / (w1+w2)
-            j = dv / wsum
-            jx = j * nx
-            jy = j * ny
-            # apply velocity changes Δv = ± j * inv_mass_contrib
-            if p1.inv_mass != 0:
-                p1.vx -= jx * w1
-                p1.vy -= jy * w1
-            if p2.inv_mass != 0:
-                p2.vx += jx * w2
-                p2.vy += jy * w2
+
+            impulse = -relative_speed / wsum
+            ix = impulse * nx
+            iy = impulse * ny
+            if w1 > 0:
+                p1.vx -= ix * w1
+                p1.vy -= iy * w1
+            if w2 > 0:
+                p2.vx += ix * w2
+                p2.vy += iy * w2
+
+    def _integrate(self, dt: float) -> None:
+        for p in self.particles:
+            if p.inv_mass == 0:
+                continue
+            p.x += p.vx * dt
+            p.y += p.vy * dt
+
+    def _collide_with_ground(self) -> None:
+        for p in self.particles:
+            if p.y >= 0:
+                continue
+            p.y = 0
+            if p.vy < 0:
+                p.vy = -p.vy * self.restitution
+            p.vx *= self.friction
+
+    def _damp_velocities(self) -> None:
+        for p in self.particles:
+            if p.inv_mass == 0:
+                continue
+            p.vx *= 0.9995
+            p.vy *= 0.9995
 
     @staticmethod
     def _wrap_angle(rad: float) -> float:
@@ -196,51 +162,81 @@ class World:
             rad += 2.0 * math.pi
         return rad
 
-    def joint_angle(self, joint: Particle, left: Particle, right: Particle) -> float:
-        """Return signed joint angle at `joint` between vectors (left-joint) and (right-joint)."""
+    @staticmethod
+    def joint_angle(joint: Particle, left: Particle, right: Particle) -> float:
         lx = left.x - joint.x
         ly = left.y - joint.y
         rx = right.x - joint.x
         ry = right.y - joint.y
-        Ll = math.hypot(lx, ly)
-        Lr = math.hypot(rx, ry)
-        if Ll == 0 or Lr == 0:
+        if math.hypot(lx, ly) == 0 or math.hypot(rx, ry) == 0:
             return 0.0
+
         dot = lx * rx + ly * ry
         cross = lx * ry - ly * rx
         return math.atan2(cross, dot)
 
-    def joint_angular_velocity(
-        self, joint: Particle, left: Particle, right: Particle
-    ) -> float:
-        """Estimate relative angular velocity between the two segments around `joint`."""
+    @staticmethod
+    def joint_angular_velocity(joint: Particle, left: Particle, right: Particle) -> float:
         lx = left.x - joint.x
         ly = left.y - joint.y
         rx = right.x - joint.x
         ry = right.y - joint.y
-        Ll = math.hypot(lx, ly)
-        Lr = math.hypot(rx, ry)
-        if Ll == 0 or Lr == 0:
+        left_len = math.hypot(lx, ly)
+        right_len = math.hypot(rx, ry)
+        if left_len == 0 or right_len == 0:
             return 0.0
-        tlx = -ly / Ll
-        tly = lx / Ll
-        trx = -ry / Lr
-        try_ = rx / Lr
-        vla_x = left.vx - joint.vx
-        vla_y = left.vy - joint.vy
-        vrc_x = right.vx - joint.vx
-        vrc_y = right.vy - joint.vy
-        w_left = (vla_x * tlx + vla_y * tly) / Ll
-        w_right = (vrc_x * trx + vrc_y * try_) / Lr
-        return w_right - w_left
 
-    def apply_joint_torque(
-        self, joint: Particle, left: Particle, right: Particle, torque: float, dt: float
-    ) -> float:
-        """Apply equal and opposite torques on the two segments around a joint."""
-        self._apply_pair_couple(joint, left, torque, dt)
-        self._apply_pair_couple(joint, right, -torque, dt)
-        return 0.0
+        left_tx = -ly / left_len
+        left_ty = lx / left_len
+        right_tx = -ry / right_len
+        right_ty = rx / right_len
+
+        left_vx = left.vx - joint.vx
+        left_vy = left.vy - joint.vy
+        right_vx = right.vx - joint.vx
+        right_vy = right.vy - joint.vy
+
+        left_w = (left_vx * left_tx + left_vy * left_ty) / left_len
+        right_w = (right_vx * right_tx + right_vy * right_ty) / right_len
+        return right_w - left_w
+
+    @staticmethod
+    def link_angle(anchor: Particle, tip: Particle) -> float:
+        return math.atan2(tip.y - anchor.y, tip.x - anchor.x)
+
+    @staticmethod
+    def link_angular_velocity(anchor: Particle, tip: Particle) -> float:
+        dx = tip.x - anchor.x
+        dy = tip.y - anchor.y
+        length = math.hypot(dx, dy)
+        if length == 0:
+            return 0.0
+
+        tx = -dy / length
+        ty = dx / length
+        relative_vx = tip.vx - anchor.vx
+        relative_vy = tip.vy - anchor.vy
+        return (relative_vx * tx + relative_vy * ty) / length
+
+    def apply_link_angle_pd(
+        self,
+        anchor: Particle,
+        tip: Particle,
+        target_angle: float,
+        stiffness: float,
+        damping: float,
+        dt: float,
+        max_torque: float | None = None,
+    ) -> tuple[float, float]:
+        angle = self.link_angle(anchor, tip)
+        angular_velocity = self.link_angular_velocity(anchor, tip)
+        error = self._wrap_angle(target_angle - angle)
+        torque = stiffness * error - damping * angular_velocity
+        if max_torque is not None:
+            torque = max(-max_torque, min(max_torque, torque))
+
+        self._apply_pair_couple(anchor, tip, -torque, dt)
+        return torque, error
 
     def apply_joint_angle_pd(
         self,
@@ -251,27 +247,31 @@ class World:
         stiffness: float,
         damping: float,
         dt: float,
-    ):
-        """Apply a spring-damper torque driving the joint toward `target_angle`."""
+        max_torque: float | None = None,
+    ) -> tuple[float, float]:
         angle = self.joint_angle(joint, left, right)
-        w_rel = self.joint_angular_velocity(joint, left, right)
-        err = self._wrap_angle(target_angle - angle)
-        torque = stiffness * err - damping * w_rel
-        self.apply_joint_torque(joint, left, right, torque, dt)
-        energy = max(0.0, torque * w_rel) * dt
-        return torque, err, energy
+        angular_velocity = self.joint_angular_velocity(joint, left, right)
+        error = self._wrap_angle(target_angle - angle)
+        torque = stiffness * error - damping * angular_velocity
+        if max_torque is not None:
+            torque = max(-max_torque, min(max_torque, torque))
 
+        self._apply_pair_couple(joint, left, torque, dt)
+        self._apply_pair_couple(joint, right, -torque, dt)
+        return torque, error
+
+    @staticmethod
     def _apply_pair_couple(
-        self, p_left: Particle, p_right: Particle, torque: float, dt: float
+        p_left: Particle, p_right: Particle, torque: float, dt: float
     ) -> None:
         dx = p_right.x - p_left.x
         dy = p_right.y - p_left.y
-        s = math.hypot(dx, dy)
-        if s == 0:
+        length = math.hypot(dx, dy)
+        if length == 0:
             return
-        nx = -dy / s
-        ny = dx / s
-        F = torque / s
-        J = F * dt
-        p_left.apply_impulse(J * nx, J * ny)
-        p_right.apply_impulse(-J * nx, -J * ny)
+
+        nx = -dy / length
+        ny = dx / length
+        impulse = (torque / length) * dt
+        p_left.apply_impulse(impulse * nx, impulse * ny)
+        p_right.apply_impulse(-impulse * nx, -impulse * ny)
