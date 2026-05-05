@@ -21,18 +21,23 @@ Run several evolution generations:
 
 Each generation logs its top three candidates to logs/evolve_tetrad.jsonl by
 default. New random immigrants are injected at each generation to preserve
-exploration; the default immigrant ratio is 10%.
+exploration; the default immigrant ratio is 10%. Position-count mutations can
+add or remove movement poses between the default bounds of 2 and 8 positions.
+Random immigrants sample the full configured space, including position count,
+pivot count, angles, clock, and branch attachments.
 
 Adjust the tetrad first position pivot target angles:
 
     python -m sim.visualize_tetrad --angle1 72 --angle2 138
 
-The tetrad view exposes three positions. Each position stores one target angle
-per pivot, and the start button loops through the three positions. The clock
-knob controls the playback speed; the default is 0.5 Hz, so each position lasts
-two seconds. The HUD also shows the actuator energy accumulated since the start
-of the simulation, the current actuator power, and a movement score. The score
-rewards horizontal center-of-mass displacement and subtracts an energy penalty.
+The tetrad view exposes movement positions. Each position stores one target angle
+per pivot, and the start button loops through the positions. The cycle knob
+controls full-cycle playback speed; the default is 0.5 Hz, so one full movement
+cycle lasts two seconds no matter how many positions exist. The HUD also shows
+the actuator energy accumulated since the start of the simulation, the current
+actuator power, and a movement score. The score
+rewards horizontal center-of-mass displacement and subtracts energy and airborne
+time penalties.
 
 Run the tests:
 

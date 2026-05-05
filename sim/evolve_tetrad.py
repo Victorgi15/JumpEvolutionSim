@@ -10,7 +10,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from sim.visualize_tetrad import Position, TetradGenome, demo, evaluate_tetrad
+from sim.visualize_tetrad import (
+    Position,
+    TetradGenome,
+    demo,
+    evaluate_tetrad,
+    normalized_branch_attachments,
+)
 
 
 @dataclass
@@ -20,18 +26,35 @@ class CandidateResult:
     metrics: dict[str, float]
 
 
-def random_tetrad_genome(rng: random.Random) -> TetradGenome:
+def random_tetrad_genome(
+    rng: random.Random,
+    min_positions: int = 2,
+    max_positions: int = 8,
+    min_angles: int = 2,
+    max_angles: int = 6,
+) -> TetradGenome:
+    min_positions = max(1, min_positions)
+    max_positions = max(min_positions, max_positions)
+    min_angles = max(2, min_angles)
+    max_angles = max(min_angles, max_angles)
+    num_positions = rng.randint(min_positions, max_positions)
+    num_angles = rng.randint(min_angles, max_angles)
     positions = [
-        Position([rng.uniform(0.0, 360.0), rng.uniform(0.0, 360.0)])
-        for _ in range(3)
+        Position([rng.uniform(0.0, 360.0) for _ in range(num_angles)])
+        for _ in range(num_positions)
     ]
-    return TetradGenome(positions, rng.uniform(0.1, 2.0))
+    branch_attachments = []
+    for branch_index in range(max(0, num_angles - 1)):
+        particle_count = 3 + branch_index
+        branch_attachments.append(rng.randrange(particle_count))
+    return TetradGenome(positions, rng.uniform(0.1, 2.0), branch_attachments)
 
 
 def clone_genome(genome: TetradGenome) -> TetradGenome:
     return TetradGenome(
         [Position(position.pivot_targets_deg.copy()) for position in genome.positions],
         genome.clock_hz,
+        normalized_branch_attachments(genome).copy(),
     )
 
 
@@ -41,6 +64,12 @@ def mutate_genome(
     mutation_rate: float = 0.35,
     angle_sigma: float = 12.0,
     clock_sigma: float = 0.12,
+    add_member_prob: float = 0.05,
+    remove_member_prob: float = 0.05,
+    add_position_prob: float = 0.02,
+    remove_position_prob: float = 0.01,
+    min_positions: int = 2,
+    max_positions: int = 8,
 ) -> TetradGenome:
     mutated = clone_genome(genome)
     for position in mutated.positions:
@@ -53,6 +82,31 @@ def mutate_genome(
         mutated.clock_hz = max(
             0.1, min(2.0, mutated.clock_hz + rng.gauss(0.0, clock_sigma))
         )
+
+    num_angles = len(mutated.positions[0].pivot_targets_deg)
+    if len(mutated.positions) < max_positions and rng.random() < add_position_prob:
+        source = rng.choice(mutated.positions)
+        new_targets = [
+            (angle + rng.gauss(0.0, angle_sigma)) % 360.0
+            for angle in source.pivot_targets_deg
+        ]
+        insert_index = rng.randrange(len(mutated.positions) + 1)
+        mutated.positions.insert(insert_index, Position(new_targets))
+    elif len(mutated.positions) > min_positions and rng.random() < remove_position_prob:
+        remove_index = rng.randrange(len(mutated.positions))
+        mutated.positions.pop(remove_index)
+
+    branch_attachments = normalized_branch_attachments(mutated)
+    if rng.random() < add_member_prob:
+        existing_particle_count = 3 + len(branch_attachments)
+        branch_attachments.append(rng.randrange(existing_particle_count))
+        for position in mutated.positions:
+            position.pivot_targets_deg.append(rng.uniform(0.0, 360.0))
+        mutated.branch_attachments = branch_attachments
+    elif num_angles > 2 and rng.random() < remove_member_prob:
+        for position in mutated.positions:
+            position.pivot_targets_deg.pop()
+        mutated.branch_attachments = branch_attachments[:-1]
     return mutated
 
 
@@ -61,12 +115,22 @@ def evaluate_population(
     duration: float = 10.0,
     seed: int | None = None,
     genomes: list[TetradGenome] | None = None,
+    min_positions: int = 2,
+    max_positions: int = 8,
+    min_angles: int = 2,
+    max_angles: int = 6,
     score_points_per_meter: float = 100.0,
     score_energy_penalty: float = 0.05,
+    score_airborne_penalty: float = 80.0,
 ) -> list[CandidateResult]:
     rng = random.Random(seed)
     if genomes is None:
-        genomes = [random_tetrad_genome(rng) for _ in range(population_size)]
+        genomes = [
+            random_tetrad_genome(
+                rng, min_positions, max_positions, min_angles, max_angles
+            )
+            for _ in range(population_size)
+        ]
 
     results = []
     for index, genome in enumerate(genomes, start=1):
@@ -75,6 +139,7 @@ def evaluate_population(
             duration=duration,
             score_points_per_meter=score_points_per_meter,
             score_energy_penalty=score_energy_penalty,
+            score_airborne_penalty=score_airborne_penalty,
         )
         results.append(CandidateResult(index, genome, metrics))
     return results
@@ -97,6 +162,14 @@ def next_generation(
     angle_sigma: float = 12.0,
     clock_sigma: float = 0.12,
     immigrant_ratio: float = 0.10,
+    add_member_prob: float = 0.05,
+    remove_member_prob: float = 0.05,
+    add_position_prob: float = 0.02,
+    remove_position_prob: float = 0.01,
+    min_positions: int = 2,
+    max_positions: int = 8,
+    min_angles: int = 2,
+    max_angles: int = 6,
 ) -> list[TetradGenome]:
     genomes = [clone_genome(result.genome) for result in selected]
     immigrant_count = max(0, int(round(population_size * immigrant_ratio)))
@@ -105,11 +178,27 @@ def next_generation(
     for _ in range(mutation_slots):
         parent = rng.choice(selected).genome
         genomes.append(
-            mutate_genome(parent, rng, mutation_rate, angle_sigma, clock_sigma)
+            mutate_genome(
+                parent,
+                rng,
+                mutation_rate,
+                angle_sigma,
+                clock_sigma,
+                add_member_prob,
+                remove_member_prob,
+                add_position_prob,
+                remove_position_prob,
+                min_positions,
+                max_positions,
+            )
         )
 
     while len(genomes) < population_size:
-        genomes.append(random_tetrad_genome(rng))
+        genomes.append(
+            random_tetrad_genome(
+                rng, min_positions, max_positions, min_angles, max_angles
+            )
+        )
 
     return genomes[:population_size]
 
@@ -117,6 +206,7 @@ def next_generation(
 def genome_to_dict(genome: TetradGenome) -> dict[str, object]:
     return {
         "clock_hz": genome.clock_hz,
+        "branch_attachments": normalized_branch_attachments(genome),
         "positions": [position.pivot_targets_deg for position in genome.positions],
     }
 
@@ -155,12 +245,24 @@ def evolve_population(
     angle_sigma: float = 12.0,
     clock_sigma: float = 0.12,
     immigrant_ratio: float = 0.10,
+    add_member_prob: float = 0.05,
+    remove_member_prob: float = 0.05,
+    add_position_prob: float = 0.02,
+    remove_position_prob: float = 0.01,
+    min_positions: int = 2,
+    max_positions: int = 8,
+    min_angles: int = 2,
+    max_angles: int = 6,
     score_points_per_meter: float = 100.0,
     score_energy_penalty: float = 0.05,
+    score_airborne_penalty: float = 80.0,
     log_path: Path | None = None,
 ) -> list[CandidateResult]:
     rng = random.Random(seed)
-    genomes = [random_tetrad_genome(rng) for _ in range(population_size)]
+    genomes = [
+        random_tetrad_genome(rng, min_positions, max_positions, min_angles, max_angles)
+        for _ in range(population_size)
+    ]
     final_results: list[CandidateResult] = []
 
     if log_path is not None:
@@ -174,6 +276,7 @@ def evolve_population(
             genomes=genomes,
             score_points_per_meter=score_points_per_meter,
             score_energy_penalty=score_energy_penalty,
+            score_airborne_penalty=score_airborne_penalty,
         )
         selected = select_best(final_results, selection_ratio)
         best = selected[0]
@@ -182,6 +285,7 @@ def evolve_population(
             f"best_score={best.metrics['score']:.2f} "
             f"dx={best.metrics['distance_x_m']:+.3f}m "
             f"energy={best.metrics['energy_total_j']:.2f}J "
+            f"air={best.metrics.get('airborne_time_s', 0.0):.2f}s "
             f"selected={len(selected)}/{population_size} "
             f"immigrants={int(round(population_size * immigrant_ratio))}"
         )
@@ -196,6 +300,14 @@ def evolve_population(
                 angle_sigma,
                 clock_sigma,
                 immigrant_ratio,
+                add_member_prob,
+                remove_member_prob,
+                add_position_prob,
+                remove_position_prob,
+                min_positions,
+                max_positions,
+                min_angles,
+                max_angles,
             )
 
     return final_results
@@ -204,8 +316,8 @@ def evolve_population(
 def format_genome(genome: TetradGenome) -> str:
     positions = []
     for position in genome.positions:
-        a1, a2 = position.pivot_targets_deg
-        positions.append(f"({a1:6.1f}, {a2:6.1f})")
+        angles = [f"{angle:6.1f}" for angle in position.pivot_targets_deg]
+        positions.append(f"({', '.join(angles)})")
     return f"clock={genome.clock_hz:.2f}Hz positions=[{', '.join(positions)}]"
 
 
@@ -217,6 +329,7 @@ def print_results(results: list[CandidateResult]) -> None:
             f"score={metrics['score']:8.2f} "
             f"dx={metrics['distance_x_m']:+7.3f}m "
             f"energy={metrics['energy_total_j']:8.2f}J "
+            f"air={metrics.get('airborne_time_s', 0.0):5.2f}s "
             f"{format_genome(result.genome)}"
         )
 
@@ -240,8 +353,17 @@ def main() -> None:
     parser.add_argument("--no-view", action="store_true")
     parser.add_argument("--view-time", type=float, default=None)
     parser.add_argument("--fps", type=int, default=60)
+    parser.add_argument("--add-member-prob", type=float, default=0.05)
+    parser.add_argument("--remove-member-prob", type=float, default=0.05)
+    parser.add_argument("--add-position-prob", type=float, default=0.02)
+    parser.add_argument("--remove-position-prob", type=float, default=0.01)
+    parser.add_argument("--min-positions", type=int, default=2)
+    parser.add_argument("--max-positions", type=int, default=8)
+    parser.add_argument("--min-angles", type=int, default=2)
+    parser.add_argument("--max-angles", type=int, default=6)
     parser.add_argument("--score-points-per-meter", type=float, default=100.0)
     parser.add_argument("--score-energy-penalty", type=float, default=0.05)
+    parser.add_argument("--score-airborne-penalty", type=float, default=80.0)
     args = parser.parse_args()
 
     results = evolve_population(
@@ -254,8 +376,17 @@ def main() -> None:
         angle_sigma=args.angle_sigma,
         clock_sigma=args.clock_sigma,
         immigrant_ratio=args.immigrant_ratio,
+        add_member_prob=args.add_member_prob,
+        remove_member_prob=args.remove_member_prob,
+        add_position_prob=args.add_position_prob,
+        remove_position_prob=args.remove_position_prob,
+        min_positions=args.min_positions,
+        max_positions=args.max_positions,
+        min_angles=args.min_angles,
+        max_angles=args.max_angles,
         score_points_per_meter=args.score_points_per_meter,
         score_energy_penalty=args.score_energy_penalty,
+        score_airborne_penalty=args.score_airborne_penalty,
         log_path=args.log_path,
     )
     if args.generations == 1:
@@ -267,7 +398,8 @@ def main() -> None:
         f"#{best.index:02d} "
         f"score={best.metrics['score']:.2f} "
         f"dx={best.metrics['distance_x_m']:+.3f}m "
-        f"energy={best.metrics['energy_total_j']:.2f}J"
+        f"energy={best.metrics['energy_total_j']:.2f}J "
+        f"air={best.metrics.get('airborne_time_s', 0.0):.2f}s"
     )
     print(format_genome(best.genome))
     print(f"log={args.log_path}")
@@ -280,6 +412,7 @@ def main() -> None:
             max_time=args.view_time,
             score_points_per_meter=args.score_points_per_meter,
             score_energy_penalty=args.score_energy_penalty,
+            score_airborne_penalty=args.score_airborne_penalty,
         )
 
 
